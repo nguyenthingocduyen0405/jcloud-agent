@@ -19,6 +19,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type HealthResponse = {
+  status: "ok";
+  cloud: string;
+  llm_provider: string;
+};
+
+export function checkBackend(signal?: AbortSignal): Promise<HealthResponse> {
+  return request("/api/health", { signal });
+}
+
 export function sendMessage(
   message: string,
   conversationContext: ConversationContextMessage[],
