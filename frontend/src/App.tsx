@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { decideOperation, sendMessage } from "./api";
-import type { ChatMessage, Operation } from "./types";
+import type { ChatMessage, ConversationContextMessage, Operation } from "./types";
 import "./styles.css";
 
 const suggestions = [
@@ -15,6 +15,15 @@ const initialMessage: ChatMessage = {
   role: "assistant",
   text: "Xin chào. Tôi là JCloud Agent chạy với dữ liệu giả lập. Tôi có thể liệt kê máy, kiểm tra quota và lập kế hoạch tạo, khởi động hoặc tắt máy.",
 };
+
+const sensitiveValuePattern = /(?:api[_ -]?key|token|password|mật khẩu|private key)\s*[:=]\s*\S+/i;
+
+export function buildConversationContext(messages: ChatMessage[]): ConversationContextMessage[] {
+  return messages
+    .filter((message) => message.text.trim() && !sensitiveValuePattern.test(message.text))
+    .map((message) => ({ role: message.role, content: message.text.slice(0, 500) }))
+    .slice(-10);
+}
 
 function Status({ value }: { value: Operation["status"] }) {
   const labels: Record<Operation["status"], string> = {
@@ -73,9 +82,10 @@ export default function App() {
     if (!trimmed || busy) return;
     setInput("");
     setBusy(true);
+    const conversationContext = buildConversationContext(messages);
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text: trimmed }]);
     try {
-      const response = await sendMessage(trimmed);
+      const response = await sendMessage(trimmed, conversationContext);
       setMessages((current) => [
         ...current,
         { id: crypto.randomUUID(), role: "assistant", text: response.message, operation: response.operation, data: response.data },

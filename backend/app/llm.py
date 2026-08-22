@@ -5,6 +5,7 @@ import os
 import re
 import unicodedata
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import Any
 
 from .schemas import ActionParameters, LLMDecision
@@ -47,10 +48,26 @@ class MockLLMClient(LLMClient):
         conversation_context: list[dict[str, str]],
         cloud_context: dict[str, Any],
     ) -> LLMDecision:
-        del conversation_context, cloud_context
+        del cloud_context
         text = _plain(message.strip())
+        create_phrases = ("tao ", "tao may", "tao instance", "create instance", "create vm")
+        analysis_text = text
+        if not any(phrase in text for phrase in create_phrases) and (
+            re.search(r"\d+\s*(?:cpu|vcpu)", text) or re.search(r"\d+\s*gb", text)
+        ):
+            prior_create = next(
+                (
+                    _plain(item["content"])
+                    for item in reversed(conversation_context[-10:])
+                    if item.get("role") == "user"
+                    and any(phrase in _plain(item.get("content", "")) for phrase in create_phrases)
+                ),
+                None,
+            )
+            if prior_create:
+                analysis_text = f"{prior_create} {text}"
 
-        if any(term in text for term in ("xoa", "delete", "shell", "powershell", "cmd.exe", "firewall", "controller", "compute node")):
+        if any(term in analysis_text for term in ("xoa", "delete", "shell", "powershell", "cmd.exe", "firewall", "controller", "compute node")):
             return LLMDecision(
                 decision_type="answer",
                 message="Yêu cầu này chưa được hỗ trợ vì nằm ngoài phạm vi an toàn của JCloud Agent.",
@@ -63,34 +80,34 @@ class MockLLMClient(LLMClient):
             return self._action("list_images", "Tôi sẽ liệt kê các image được phép.")
         if any(phrase in text for phrase in ("flavor nao", "liet ke flavor", "list flavor")):
             return self._action("list_flavors", "Tôi sẽ liệt kê các flavor được phép.")
-        if text.startswith("tao ") or any(
-            phrase in text for phrase in ("tao may", "tao instance", "create instance", "create vm")
+        if analysis_text.startswith("tao ") or any(
+            phrase in analysis_text for phrase in create_phrases
         ):
-            if "may manh" in text or "powerful" in text:
+            if "may manh" in analysis_text or "powerful" in analysis_text:
                 return LLMDecision(
                     decision_type="clarification",
                     message="Bạn sử dụng máy cho mục đích gì và có cần GPU không?",
                 )
-            cpu_match = re.search(r"(\d+)\s*(?:cpu|vcpu)", text)
-            ram_match = re.search(r"(?:ram\s*)?(\d+)\s*gb(?:\s*ram)?", text)
+            cpu_match = re.search(r"(\d+)\s*(?:cpu|vcpu)", analysis_text)
+            ram_match = re.search(r"(?:ram\s*)?(\d+)\s*gb(?:\s*ram)?", analysis_text)
             if not cpu_match or not ram_match:
                 return LLMDecision(
                     decision_type="clarification",
                     message="Vui lòng cho biết số vCPU, dung lượng RAM và có cần GPU hay không.",
                 )
             requires_gpu = None
-            if any(phrase in text for phrase in ("khong can gpu", "khong gpu", "no gpu")):
+            if any(phrase in analysis_text for phrase in ("khong can gpu", "khong gpu", "no gpu")):
                 requires_gpu = False
-            elif "gpu" in text:
+            elif "gpu" in analysis_text:
                 requires_gpu = True
             else:
                 requires_gpu = False
-            name_match = re.search(r"(?:ten|name)\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})", text)
+            name_match = re.search(r"(?:ten|name)\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})", analysis_text)
             return self._action(
                 "plan_create_instance",
                 "Tôi sẽ kiểm tra cấu hình phù hợp.",
                 ActionParameters(
-                    operating_system="ubuntu" if "ubuntu" in text else None,
+                    operating_system="ubuntu" if "ubuntu" in analysis_text else None,
                     vcpus=int(cpu_match.group(1)),
                     ram_gb=int(ram_match.group(1)),
                     requires_gpu=requires_gpu,
@@ -126,15 +143,27 @@ class MockLLMClient(LLMClient):
 class OpenAILLMClient(LLMClient):
     """OpenAI Responses API adapter. It receives no tools and cannot execute cloud actions."""
 
-    def __init__(self, model: str, api_key: str) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        *,
+        timeout_seconds: float = 15.0,
+        max_output_tokens: int = 500,
+        client: Any | None = None,
+    ) -> None:
         if not model:
             raise ValueError("LLM_MODEL is required when LLM_PROVIDER=openai")
         if not api_key:
             raise ValueError("LLM_API_KEY is required when LLM_PROVIDER=openai")
-        from openai import OpenAI
-
         self.model = model
-        self.client = OpenAI(api_key=api_key)
+        self.timeout_seconds = timeout_seconds
+        self.max_output_tokens = max_output_tokens
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key, timeout=timeout_seconds)
+        self.client = client
 
     def parse_message(
         self,
@@ -151,16 +180,18 @@ class OpenAILLMClient(LLMClient):
             response = self.client.responses.create(
                 model=self.model,
                 store=False,
+                max_output_tokens=self.max_output_tokens,
                 instructions=SYSTEM_INSTRUCTIONS,
                 input=json.dumps(prompt_payload, ensure_ascii=False),
                 text={
                     "format": {
                         "type": "json_schema",
                         "name": "jcloud_decision",
-                        "schema": LLMDecision.model_json_schema(),
-                        "strict": False,
+                        "schema": strict_llm_decision_schema(),
+                        "strict": True,
                     }
                 },
+                timeout=self.timeout_seconds,
             )
             return LLMDecision.model_validate_json(response.output_text)
         except Exception as exc:
@@ -185,5 +216,31 @@ def create_llm_client() -> LLMClient:
         return OpenAILLMClient(
             model=os.getenv("LLM_MODEL", ""),
             api_key=os.getenv("LLM_API_KEY", ""),
+            timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "15")),
+            max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "500")),
         )
     raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
+
+
+def strict_llm_decision_schema() -> dict[str, Any]:
+    """Return the Pydantic schema normalized for OpenAI strict Structured Outputs."""
+    schema = deepcopy(LLMDecision.model_json_schema())
+
+    def normalize(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                normalize(item)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("default") is None:
+            node.pop("default", None)
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            node["required"] = list(properties.keys())
+            node["additionalProperties"] = False
+        for value in node.values():
+            normalize(value)
+
+    normalize(schema)
+    return schema

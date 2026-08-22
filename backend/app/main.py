@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
@@ -14,7 +14,25 @@ from .cloud import CloudClient, MockCloudClient
 from .database import Repository, utc_now
 from .llm import LLMClient, LLMClientError, create_llm_client
 from .policy import ALLOWED_ACTIONS, MUTATING_ACTIONS, contains_sensitive_value, is_prohibited_request
-from .schemas import ActionParameters, ChatRequest, ChatResponse, LLMDecision, Operation
+from .schemas import (
+    ActionParameters,
+    ChatRequest,
+    ChatResponse,
+    LLMDecision,
+    Operation,
+    RequestIdentity,
+)
+
+
+def get_request_identity(
+    session_id: Annotated[str, Header(alias="X-Session-ID")] = "mock-session",
+    user_id: Annotated[str, Header(alias="X-User-ID")] = "mock-user",
+    project_id: Annotated[str, Header(alias="X-Project-ID")] = "mock-project",
+) -> RequestIdentity:
+    return RequestIdentity(session_id=session_id, user_id=user_id, project_id=project_id)
+
+
+IdentityDependency = Annotated[RequestIdentity, Depends(get_request_identity)]
 
 
 def create_app(
@@ -58,7 +76,7 @@ def create_app(
         return cloud.get_quota()
 
     @application.post("/api/chat", response_model=ChatResponse)
-    def chat(request: ChatRequest) -> ChatResponse:
+    def chat(request: ChatRequest, identity: IdentityDependency) -> ChatResponse:
         all_user_text = "\n".join(
             [request.message, *(item.content for item in request.conversation_context)]
         )
@@ -144,6 +162,9 @@ def create_app(
         operation = repository.create_operation(
             {
                 "id": uuid4().hex,
+                "session_id": identity.session_id,
+                "user_id": identity.user_id,
+                "project_id": identity.project_id,
                 "action": operation_action,
                 "status": "waiting_for_confirmation",
                 "summary": summary,
@@ -160,20 +181,32 @@ def create_app(
         )
 
     @application.get("/api/operations/{operation_id}", response_model=Operation)
-    def get_operation(operation_id: str) -> Operation:
-        operation = repository.get_operation(operation_id)
+    def get_operation(operation_id: str, identity: IdentityDependency) -> Operation:
+        operation = repository.get_operation(
+            operation_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
         if not operation:
             raise HTTPException(status_code=404, detail="Operation not found")
         return Operation.model_validate(operation)
 
     @application.post("/api/operations/{operation_id}/confirm", response_model=Operation)
-    def confirm_operation(operation_id: str) -> Operation:
-        operation = repository.get_operation(operation_id)
-        if not operation:
+    def confirm_operation(operation_id: str, identity: IdentityDependency) -> Operation:
+        owned_operation = repository.get_operation(
+            operation_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
+        if not owned_operation:
             raise HTTPException(status_code=404, detail="Operation not found")
-        if operation["status"] != "waiting_for_confirmation":
+        operation = repository.claim_operation(
+            operation_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
+        if not operation:
             raise HTTPException(status_code=409, detail="Operation is no longer awaiting confirmation")
-        repository.update_operation(operation_id, "running")
         try:
             if operation["action"] == "create_instance":
                 result = cloud.create_instance(operation["payload"])
@@ -191,13 +224,21 @@ def create_app(
         return Operation.model_validate(updated)
 
     @application.post("/api/operations/{operation_id}/cancel", response_model=Operation)
-    def cancel_operation(operation_id: str) -> Operation:
-        operation = repository.get_operation(operation_id)
-        if not operation:
+    def cancel_operation(operation_id: str, identity: IdentityDependency) -> Operation:
+        owned_operation = repository.get_operation(
+            operation_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
+        if not owned_operation:
             raise HTTPException(status_code=404, detail="Operation not found")
-        if operation["status"] != "waiting_for_confirmation":
+        updated = repository.cancel_operation(
+            operation_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
+        if not updated:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Operation cannot be cancelled")
-        updated = repository.update_operation(operation_id, "cancelled")
         return Operation.model_validate(updated)
 
     return application

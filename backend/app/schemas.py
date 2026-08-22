@@ -23,6 +23,14 @@ class ConversationMessage(BaseModel):
     content: str = Field(min_length=1, max_length=500)
 
 
+class RequestIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:-]+$")
+    user_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:-]+$")
+    project_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9._:-]+$")
+
+
 class ActionParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,6 +68,9 @@ class ChatRequest(BaseModel):
 
 class Operation(BaseModel):
     id: str
+    session_id: str
+    user_id: str
+    project_id: str
     action: Literal["create_instance", "start_instance", "stop_instance", "reboot_instance"]
     status: OperationStatus
     summary: str

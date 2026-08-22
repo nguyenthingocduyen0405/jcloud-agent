@@ -76,7 +76,7 @@ Provider 설정을 변경한 후에는 백엔드를 다시 시작해야 합니�
 프로젝트 디렉터리에서 PowerShell을 엽니다.
 
 ```powershell
-cd "C:\Users\dn160\OneDrive\Desktop\jcloud_agent\backend"
+cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --env-file ..\.env
@@ -93,7 +93,7 @@ python -m venv .venv
 별도의 PowerShell 창에서 다음 명령을 실행합니다.
 
 ```powershell
-cd "C:\Users\dn160\OneDrive\Desktop\jcloud_agent\frontend"
+cd frontend
 npm.cmd install
 npm.cmd run dev
 ```
@@ -117,6 +117,25 @@ parse_message(message, conversation_context, cloud_context)
 작업 허용 목록은 `list_instances`, `get_quota`, `list_images`, `list_flavors`, `plan_create_instance`, `start_instance`, `stop_instance`, `reboot_instance`입니다.
 
 인스턴스 삭제, 셸 명령 실행, controller/compute node 변경, 공유 네트워크 변경, 전체 방화벽 개방은 지원하지 않습니다.
+
+OpenAI provider는 strict Structured Outputs를 사용하며 요청마다 기본 15초 timeout과 500 output-token 제한을 적용합니다. 다음 환경 변수로 값을 조정할 수 있습니다.
+
+```dotenv
+LLM_TIMEOUT_SECONDS=15
+LLM_MAX_OUTPUT_TOKENS=500
+```
+
+프런트엔드는 현재 메시지를 제외한 최근 대화 텍스트를 최대 10개까지 `conversation_context`로 전송합니다. operation payload와 민감한 값은 대화 context에 포함하지 않습니다.
+
+## 모의 사용자 및 프로젝트
+
+Keystone은 아직 연동하지 않았습니다. 로컬 mock 모드에서는 다음 HTTP header를 고정 identity로 사용합니다.
+
+- `X-Session-ID: mock-session`
+- `X-User-ID: mock-user`
+- `X-Project-ID: mock-project`
+
+operation에는 session, user, project가 기록됩니다. 다른 user/project의 operation은 조회, 취소 또는 확인할 수 없습니다.
 
 ## 테스트
 
@@ -152,4 +171,3 @@ npm.cmd run build
 - 기본 가상 머신: `web-demo`, `test-01`
 - 백엔드는 대화 내용이나 API 키를 SQLite에 저장하지 않습니다.
 - `.env`는 `.gitignore`에 포함되어 있으므로 커밋하지 않습니다.
-
