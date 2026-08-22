@@ -1,53 +1,53 @@
 # JCloud Agent MVP
 
-Ứng dụng web chạy cục bộ để thử nghiệm quản lý máy ảo bằng hội thoại. Cloud hiện dùng dữ liệu giả lập; không kết nối JCloud/OpenStack thật và không chạy lệnh shell do người dùng hoặc AI tạo ra.
+자연어 대화를 통해 가상 머신 관리 흐름을 시험할 수 있는 로컬 웹 애플리케이션입니다. 현재 클라우드 계층은 모의 데이터를 사용하며, 실제 JCloud/OpenStack에 연결하지 않습니다. 또한 사용자나 AI가 생성한 셸 명령을 실행하지 않습니다.
 
-## Kiến trúc an toàn
+## 안전한 아키텍처
 
 ```text
-Người dùng
-    │ ngôn ngữ tự nhiên
-    ▼
-React chat UI ──HTTP──► FastAPI
-                           │
-                           ▼
-                LLMClient.parse_message()
-                  │ chỉ trả LLMDecision đã
-                  │ được Pydantic kiểm tra
-                  ▼
-            allowlist + policy + xác minh metadata
-                  │
-                  ├─ thao tác đọc: CloudClient
-                  │
-                  └─ thao tác thay đổi: tạo operation
-                         │ waiting_for_confirmation
-                         ▼
-                    người dùng xác nhận
-                         ▼
-                 MockCloudClient ──► SQLite
+사용자
+  │ 자연어 요청
+  ▼
+React 채팅 UI ──HTTP──► FastAPI
+                            │
+                            ▼
+                 LLMClient.parse_message()
+                   │ Pydantic 검증을 통과한
+                   │ LLMDecision만 반환
+                   ▼
+             허용 목록 + 정책 + 메타데이터 검증
+                   │
+                   ├─ 조회 작업: CloudClient
+                   │
+                   └─ 변경 작업: operation 생성
+                          │ waiting_for_confirmation
+                          ▼
+                       사용자 확인
+                          ▼
+                  MockCloudClient ──► SQLite
 ```
 
-LLM chỉ hiểu ý định và trả JSON có cấu trúc. LLM không nhận tool, không gọi `CloudClient`, không chạy shell và không thực hiện thay đổi. Chỉ backend được phép ánh xạ action qua allowlist, tìm image/flavor thật từ `CloudClient`, kiểm tra quota/chính sách và thực hiện operation đã được xác nhận.
+LLM은 사용자의 의도를 이해하고 구조화된 JSON을 반환하는 역할만 담당합니다. LLM에는 도구가 제공되지 않으며, `CloudClient` 호출, 셸 실행 또는 리소스 변경을 직접 수행할 수 없습니다. 백엔드만 작업 허용 목록을 적용하고, `CloudClient`에서 실제 image/flavor 정보를 조회하여 검증하고, quota와 정책을 확인한 후 사용자가 승인한 operation을 실행할 수 있습니다.
 
-`CloudClient` vẫn là ranh giới tích hợp. Có thể thêm `OpenStackCloudClient` sau này mà không thay đổi giao diện chat hoặc lớp LLM.
+`CloudClient`는 클라우드 연동 경계로 유지됩니다. 향후 채팅 UI나 LLM 계층을 변경하지 않고 `OpenStackCloudClient`를 추가할 수 있습니다.
 
-## Yêu cầu
+## 요구 사항
 
 - Windows 10/11
-- Python 3.11 trở lên
-- Node.js 20 trở lên
+- Python 3.11 이상
+- Node.js 20 이상
 
-## Cấu hình LLM
+## LLM 설정
 
-Sao chép file cấu hình mẫu tại thư mục gốc:
+프로젝트 루트에서 예제 환경 설정 파일을 복사합니다.
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-### Chạy bằng MockLLMClient
+### MockLLMClient로 실행
 
-Không cần API key và không gọi Internet:
+API 키와 인터넷 연결이 필요하지 않습니다.
 
 ```dotenv
 LLM_PROVIDER=mock
@@ -55,25 +55,25 @@ LLM_MODEL=
 LLM_API_KEY=
 ```
 
-Đây là chế độ mặc định và cũng là chế độ dùng trong test tự động.
+기본 실행 모드이며 자동화 테스트에서도 이 모드를 사용합니다.
 
-### Chạy bằng OpenAI
+### OpenAI로 실행
 
-Đặt API key **chỉ trong file `.env` ở thư mục gốc**, không đặt trong frontend, source code, log hoặc `.env.example`:
+API 키는 반드시 프로젝트 루트의 `.env` 파일에만 저장하세요. 프런트엔드, 소스 코드, 로그 또는 `.env.example`에는 API 키를 입력하지 마세요.
 
 ```dotenv
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-5-mini
-LLM_API_KEY=đặt-api-key-thật-tại-đây
+LLM_API_KEY=여기에-실제-API-키-입력
 ```
 
-Chọn một model có Structured Outputs và Responses API mà tài khoản của bạn được phép sử dụng. Adapter OpenAI gửi request với `store=false`, không cấu hình tool, và kiểm tra lại toàn bộ output bằng `LLMDecision` của Pydantic. Nếu provider lỗi hoặc output không hợp lệ, backend trả thông báo an toàn và không tạo operation.
+계정에서 사용할 수 있고 Responses API와 Structured Outputs를 지원하는 모델을 선택해야 합니다. OpenAI 어댑터는 `store=false`로 요청하고 도구를 구성하지 않으며, 모든 출력을 Pydantic의 `LLMDecision`으로 다시 검증합니다. Provider 오류가 발생하거나 출력이 유효하지 않으면 백엔드는 안전한 오류 메시지만 반환하고 operation을 생성하지 않습니다.
 
-Sau khi đổi provider, cần khởi động lại backend.
+Provider 설정을 변경한 후에는 백엔드를 다시 시작해야 합니다.
 
-## Khởi động backend trên Windows
+## Windows에서 백엔드 실행
 
-Mở PowerShell tại thư mục dự án:
+프로젝트 디렉터리에서 PowerShell을 엽니다.
 
 ```powershell
 cd "C:\Users\dn160\OneDrive\Desktop\jcloud_agent\backend"
@@ -82,15 +82,15 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --env-file ..\.env
 ```
 
-Nếu chưa tạo `.env`, bỏ phần `--env-file ..\.env`; backend sẽ tự dùng `LLM_PROVIDER=mock`.
+`.env` 파일을 만들지 않았다면 `--env-file ..\.env` 부분을 제외하세요. 이 경우 백엔드는 자동으로 `LLM_PROVIDER=mock`을 사용합니다.
 
 - API: <http://127.0.0.1:8000>
-- API docs: <http://127.0.0.1:8000/docs>
-- Health/provider hiện tại: <http://127.0.0.1:8000/api/health>
+- API 문서: <http://127.0.0.1:8000/docs>
+- 현재 상태 및 provider: <http://127.0.0.1:8000/api/health>
 
-## Khởi động frontend trên Windows
+## Windows에서 프런트엔드 실행
 
-Trong cửa sổ PowerShell khác:
+별도의 PowerShell 창에서 다음 명령을 실행합니다.
 
 ```powershell
 cd "C:\Users\dn160\OneDrive\Desktop\jcloud_agent\frontend"
@@ -98,58 +98,58 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Mở <http://127.0.0.1:5173>. Frontend mặc định gọi backend tại `http://127.0.0.1:8000`.
+브라우저에서 <http://127.0.0.1:5173>을 엽니다. 프런트엔드는 기본적으로 `http://127.0.0.1:8000`의 백엔드를 호출합니다.
 
-## Structured output
+## 구조화된 출력
 
-Mọi provider phải triển khai:
+모든 provider는 다음 메서드를 구현해야 합니다.
 
 ```python
 parse_message(message, conversation_context, cloud_context)
 ```
 
-Và phải trả `LLMDecision` hợp lệ với một trong ba loại:
+그리고 다음 세 가지 유형 중 하나에 해당하는 유효한 `LLMDecision`을 반환해야 합니다.
 
-- `action`: yêu cầu một action nằm trong allowlist.
-- `clarification`: thiếu dữ liệu quan trọng, cần hỏi lại.
-- `answer`: chỉ trả lời hoặc từ chối, không thao tác.
+- `action`: 허용 목록에 있는 작업을 요청합니다.
+- `clarification`: 중요한 정보가 부족하여 사용자에게 추가 질문이 필요합니다.
+- `answer`: 설명하거나 요청을 거절하며 어떠한 작업도 수행하지 않습니다.
 
-Allowlist gồm `list_instances`, `get_quota`, `list_images`, `list_flavors`, `plan_create_instance`, `start_instance`, `stop_instance` và `reboot_instance`.
+작업 허용 목록은 `list_instances`, `get_quota`, `list_images`, `list_flavors`, `plan_create_instance`, `start_instance`, `stop_instance`, `reboot_instance`입니다.
 
-Không hỗ trợ xóa instance, shell command, thay đổi controller/compute node, thay đổi network dùng chung hoặc mở toàn bộ firewall.
+인스턴스 삭제, 셸 명령 실행, controller/compute node 변경, 공유 네트워크 변경, 전체 방화벽 개방은 지원하지 않습니다.
 
-## Kiểm thử
+## 테스트
 
-Test backend luôn inject `MockLLMClient`; không gọi API thật và không đọc API key:
+백엔드 테스트는 항상 `MockLLMClient`를 주입하므로 실제 API를 호출하거나 API 키를 읽지 않습니다.
 
 ```powershell
 cd backend
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Kiểm tra frontend:
+프런트엔드는 다음 명령으로 확인합니다.
 
 ```powershell
 cd frontend
 npm.cmd run build
 ```
 
-## Yêu cầu mẫu
+## 요청 예시
 
-- `Liệt kê máy của tôi.`
-- `Tôi còn bao nhiêu CPU?`
-- `Tạo Ubuntu 4 CPU và 16 GB RAM.`
-- `Tạo cho tôi một máy mạnh.`
-- `Khởi động máy test-01.`
-- `Tắt máy test-01.`
-- `Khởi động lại máy test-01.`
+- `내 가상 머신 목록을 보여 줘.`
+- `사용 가능한 CPU가 얼마나 남았어?`
+- `Ubuntu, CPU 4개, RAM 16GB인 머신을 만들어 줘.`
+- `강력한 머신을 하나 만들어 줘.`
+- `test-01 머신을 시작해 줘.`
+- `test-01 머신을 중지해 줘.`
+- `test-01 머신을 재부팅해 줘.`
 
-Các thao tác tạo, khởi động, tắt và reboot chỉ tạo operation ở trạng thái `waiting_for_confirmation`. Dữ liệu chỉ thay đổi sau khi người dùng chọn **Xác nhận**.
+생성, 시작, 중지, 재부팅 요청은 먼저 `waiting_for_confirmation` 상태의 operation만 생성합니다. 사용자가 **확인**을 선택한 후에만 모의 데이터가 변경됩니다.
 
-## Dữ liệu
+## 데이터
 
-- SQLite mặc định: `backend/data/jcloud_agent.db`.
-- Hai máy mẫu: `web-demo` và `test-01`.
-- Backend không lưu nội dung hội thoại hoặc API key vào SQLite.
-- `.env` đã nằm trong `.gitignore`; không commit file này.
+- 기본 SQLite 경로: `backend/data/jcloud_agent.db`
+- 기본 가상 머신: `web-demo`, `test-01`
+- 백엔드는 대화 내용이나 API 키를 SQLite에 저장하지 않습니다.
+- `.env`는 `.gitignore`에 포함되어 있으므로 커밋하지 않습니다.
 
