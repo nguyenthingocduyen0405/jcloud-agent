@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from .cloud import CloudClient, MockCloudClient
@@ -240,6 +241,10 @@ def create_app(
         if not updated:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Operation cannot be cancelled")
         return Operation.model_validate(updated)
+
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        application.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
     return application
 

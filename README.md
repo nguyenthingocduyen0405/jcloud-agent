@@ -100,6 +100,18 @@ npm.cmd run dev
 
 브라우저에서 <http://127.0.0.1:5173>을 엽니다. 프런트엔드는 기본적으로 `http://127.0.0.1:8000`의 백엔드를 호출합니다.
 
+## Render에 공개 배포
+
+저장소 루트의 `render.yaml`은 FastAPI와 React 정적 빌드를 하나의 공개 Web Service로 배포합니다. Render에서 이 GitHub 저장소를 Blueprint로 연결하면 자동으로 빌드하고 `onrender.com` URL을 발급합니다.
+
+- 배포 모드는 항상 `LLM_PROVIDER=mock`입니다.
+- API 키나 OpenStack credential은 필요하지 않습니다.
+- 프로덕션 React 빌드는 FastAPI와 같은 origin에서 제공됩니다.
+- `main` 브랜치에 push하면 Render가 자동으로 다시 배포합니다.
+- free Web Service의 로컬 파일 시스템은 영구 저장소가 아닙니다. 따라서 SQLite 데이터는 service restart, redeploy 또는 spin-down 후 초기 mock 데이터로 돌아갈 수 있습니다.
+
+이 구성은 공개 MVP 데모용입니다. 실제 사용자 데이터나 실제 클라우드 리소스 관리에는 사용하지 마세요.
+
 ## 구조화된 출력
 
 모든 provider는 다음 메서드를 구현해야 합니다.
