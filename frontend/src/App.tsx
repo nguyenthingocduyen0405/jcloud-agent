@@ -200,8 +200,21 @@ export default function App() {
 
   return (
     <main className="shell">
+      <nav className="topbar" aria-label="JCloud dashboard">
+        <div className="topbar__brand"><span>JCloud</span><strong>Dashboard</strong></div>
+        <div className="topbar__meta">JEONBUK NATIONAL UNIVERSITY</div>
+      </nav>
       <aside className="sidebar">
-        <div className="brand"><span className="brand__mark">JC</span><div><strong>JCloud Agent</strong><small>Mock environment</small></div></div>
+        <div className="brand">
+          <img className="brand__logo" src="https://jcloud.jbnu.ac.kr/dashboard/static/dashboard/img/logo-splash.svg" alt="JCloud" />
+          <div><strong>JCloud Agent</strong><small>Mock environment</small></div>
+        </div>
+        <div className="sidebar-nav" aria-label="프로젝트 탐색">
+          <span className="sidebar-nav__title">프로젝트</span>
+          <span className="sidebar-nav__item sidebar-nav__item--active">JCloud Agent</span>
+          <span className="sidebar-nav__item">인스턴스 관리</span>
+          <span className="sidebar-nav__item">리소스 할당량</span>
+        </div>
         <div className={`environment environment--${connectionStatus}`} aria-live="polite">
           <span className="pulse" />
           {connectionStatus === "connecting" && "연결 중..."}
@@ -219,7 +232,10 @@ export default function App() {
 
       <section className="chat">
         <header>
-          <div><span className="eyebrow">CONTROL PLANE ASSISTANT</span><h1>대화형 클라우드 관리</h1></div>
+          <div>
+            <div className="breadcrumb"><span>프로젝트</span><b>/</b><span>JCloud Agent</span></div>
+            <h1>대화형 클라우드 관리</h1>
+          </div>
           <div className="header-actions">
             <button type="button" onClick={startNewConversation} disabled={busy}>새 대화</button>
             <button type="button" className="reset-button" onClick={() => void handleResetSandbox()} disabled={busy || connectionStatus !== "ready"}>Sandbox 초기화</button>
