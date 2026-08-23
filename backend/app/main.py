@@ -89,11 +89,11 @@ def create_app(
         )
         if contains_sensitive_value(all_user_text):
             return ChatResponse(
-                message="Không gửi API key, token, mật khẩu hoặc private key vào cuộc trò chuyện. Yêu cầu chưa được chuyển tới LLM."
+                message="대화에 API key, token, 비밀번호 또는 private key를 입력하지 마세요. 이 요청은 LLM에 전달되지 않았습니다."
             )
         if is_prohibited_request(request.message):
             return ChatResponse(
-                message="Yêu cầu này chưa được hỗ trợ vì nằm ngoài phạm vi an toàn của JCloud Agent."
+                message="이 요청은 JCloud Agent의 안전 범위를 벗어나므로 지원되지 않습니다."
             )
 
         cloud_context = {
@@ -123,27 +123,27 @@ def create_app(
             decision = LLMDecision.model_validate(raw_decision)
         except (LLMClientError, ValidationError, ValueError, TypeError, RuntimeError):
             return ChatResponse(
-                message="Không thể hiểu yêu cầu một cách an toàn lúc này. Không có thao tác nào được thực hiện."
+                message="현재 요청을 안전하게 해석할 수 없습니다. 어떠한 작업도 실행되지 않았습니다."
             )
 
         if decision.decision_type != "action":
             return ChatResponse(message=decision.message)
         if decision.action not in ALLOWED_ACTIONS:
-            return ChatResponse(message="Thao tác này chưa được hỗ trợ.")
+            return ChatResponse(message="이 작업은 아직 지원되지 않습니다.")
 
         if decision.action == "list_instances":
             instances = cloud.list_instances(identity.session_id)
             return ChatResponse(message=decision.message, data=instances)
         if decision.action == "get_quota":
             quota = cloud.get_quota(identity.session_id)
-            message = f"Còn {quota['available_vcpus']} vCPU và {quota['available_ram_gb']} GB RAM."
+            message = f"사용 가능한 자원은 {quota['available_vcpus']} vCPU와 RAM {quota['available_ram_gb']} GB입니다."
             return ChatResponse(message=message, data=quota)
         if decision.action == "list_images":
             return ChatResponse(message=decision.message, data=cloud.list_images())
         if decision.action == "list_flavors":
             return ChatResponse(message=decision.message, data=cloud.list_flavors())
         if decision.action not in MUTATING_ACTIONS:
-            return ChatResponse(message="Thao tác này chưa được hỗ trợ.")
+            return ChatResponse(message="이 작업은 아직 지원되지 않습니다.")
 
         response_message = decision.message
         try:
@@ -156,26 +156,26 @@ def create_app(
                 payload = resolve_instance_plan(decision.parameters, cloud)
                 cloud.plan_create_instance(identity.session_id, payload)
                 if uses_default_ubuntu and "24.04" not in response_message:
-                    response_message += " Bạn không nêu phiên bản Ubuntu nên tôi mặc định chọn Ubuntu 24.04."
+                    response_message += " Ubuntu 버전을 지정하지 않아 Ubuntu 24.04를 기본으로 선택합니다."
                 summary = (
-                    f"Tạo {payload['name']} với {payload['image']}, "
-                    f"{payload['vcpus']} vCPU và {payload['ram_gb']} GB RAM"
+                    f"{payload['name']} 생성: {payload['image']}, "
+                    f"{payload['vcpus']} vCPU, RAM {payload['ram_gb']} GB"
                 )
                 operation_action = "create_instance"
             else:
                 name = decision.parameters.name
                 if not name:
-                    return ChatResponse(message="Bạn muốn thao tác với máy nào?")
+                    return ChatResponse(message="어떤 머신을 대상으로 작업할까요?")
                 if not repository.get_instance(identity.session_id, name):
-                    raise ValueError(f"Không tìm thấy máy '{name}'")
+                    raise ValueError(f"머신 '{name}'을(를) 찾을 수 없습니다.")
                 operation_action = decision.action
                 payload = {"name": name}
                 verbs = {
-                    "start_instance": "Khởi động",
-                    "stop_instance": "Tắt",
-                    "reboot_instance": "Khởi động lại",
+                    "start_instance": "시작",
+                    "stop_instance": "중지",
+                    "reboot_instance": "재부팅",
                 }
-                summary = f"{verbs[operation_action]} máy {name}"
+                summary = f"머신 {name} {verbs[operation_action]}"
         except ValueError as exc:
             return ChatResponse(message=str(exc))
 
@@ -197,7 +197,7 @@ def create_app(
             }
         )
         return ChatResponse(
-            message=f"{response_message} Kế hoạch đã sẵn sàng; vui lòng xác nhận trước khi thực hiện.",
+            message=f"{response_message} 계획이 준비되었습니다. 실행 전에 확인해 주세요.",
             operation=Operation.model_validate(operation),
         )
 
@@ -290,9 +290,9 @@ def create_app(
 
 def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> dict[str, Any]:
     if not parameters.operating_system or parameters.vcpus is None or parameters.ram_gb is None:
-        raise ValueError("Vui lòng cho biết hệ điều hành, số vCPU và dung lượng RAM.")
+        raise ValueError("운영체제, vCPU 수와 RAM 용량을 알려 주세요.")
     if parameters.requires_gpu:
-        raise ValueError("GPU chưa được hỗ trợ trong MVP này.")
+        raise ValueError("이 MVP에서는 GPU를 아직 지원하지 않습니다.")
 
     os_name = parameters.operating_system.strip().lower()
     requested_version = parameters.operating_system_version
@@ -308,7 +308,7 @@ def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> d
         None,
     )
     if not image:
-        raise ValueError("Không tìm thấy image được phép cho hệ điều hành đã yêu cầu.")
+        raise ValueError("요청한 운영체제에 허용된 이미지를 찾을 수 없습니다.")
     flavor = next(
         (
             item
@@ -318,7 +318,7 @@ def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> d
         None,
     )
     if not flavor:
-        raise ValueError("Không có flavor được phép khớp chính xác với CPU và RAM đã yêu cầu.")
+        raise ValueError("요청한 CPU와 RAM에 정확히 일치하는 허용된 flavor가 없습니다.")
 
     return {
         "name": parameters.name or f"{os_name}-demo",

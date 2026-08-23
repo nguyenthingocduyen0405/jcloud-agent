@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import unicodedata
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Any
@@ -27,16 +26,15 @@ class LLMClient(ABC):
 
 
 def _plain(text: str) -> str:
-    normalized = unicodedata.normalize("NFD", text.lower())
-    without_marks = "".join(
-        character for character in normalized if unicodedata.category(character) != "Mn"
-    )
-    return without_marks.replace("đ", "d")
+    return text.lower().strip()
 
 
 def _instance_name(text: str) -> str | None:
-    match = re.search(r"(?:may|instance)\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})", _plain(text))
-    return match.group(1) if match else None
+    match = re.search(
+        r"(?:인스턴스|가상\s*머신|머신|서버|instance)\s+(?:이름(?:은|이|을)?\s*)?([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})|([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})\s*(?:인스턴스|가상\s*머신|머신|서버|instance)",
+        _plain(text),
+    )
+    return (match.group(1) or match.group(2)) if match else None
 
 
 class MockLLMClient(LLMClient):
@@ -50,7 +48,7 @@ class MockLLMClient(LLMClient):
     ) -> LLMDecision:
         del cloud_context
         text = _plain(message.strip())
-        create_phrases = ("tao ", "tao may", "tao instance", "create instance", "create vm")
+        create_phrases = ("생성", "만들", "create instance", "create vm")
         analysis_text = text
         if not any(phrase in text for phrase in create_phrases) and (
             re.search(r"\d+\s*(?:cpu|vcpu)", text) or re.search(r"\d+\s*gb", text)
@@ -67,52 +65,55 @@ class MockLLMClient(LLMClient):
             if prior_create:
                 analysis_text = f"{prior_create} {text}"
 
-        if any(term in analysis_text for term in ("xoa", "delete", "shell", "powershell", "cmd.exe", "firewall", "controller", "compute node")):
+        if any(term in analysis_text for term in ("삭제", "delete", "shell", "powershell", "cmd.exe", "firewall", "방화벽", "controller", "compute node")):
             return LLMDecision(
                 decision_type="answer",
-                message="Yêu cầu này chưa được hỗ trợ vì nằm ngoài phạm vi an toàn của JCloud Agent.",
+                message="이 요청은 JCloud Agent의 안전 범위를 벗어나므로 지원되지 않습니다.",
             )
-        if any(phrase in text for phrase in ("liet ke", "danh sach", "list instance", "list may")):
-            return self._action("list_instances", "Tôi sẽ liệt kê các máy ảo hiện có.")
-        if "quota" in text or ("cpu" in text and any(word in text for word in ("con", "bao nhieu", "available"))):
-            return self._action("get_quota", "Tôi sẽ kiểm tra quota hiện tại.")
-        if any(phrase in text for phrase in ("image nao", "liet ke image", "list image")):
-            return self._action("list_images", "Tôi sẽ liệt kê các image được phép.")
-        if any(phrase in text for phrase in ("flavor nao", "liet ke flavor", "list flavor")):
-            return self._action("list_flavors", "Tôi sẽ liệt kê các flavor được phép.")
-        if analysis_text.startswith("tao ") or any(
-            phrase in analysis_text for phrase in create_phrases
+        if any(phrase in text for phrase in ("목록", "리스트", "보여", "조회", "list instance")):
+            return self._action("list_instances", "현재 가상 머신 목록을 확인하겠습니다.")
+        if "quota" in text or "할당량" in text or (
+            "cpu" in text and any(word in text for word in ("남", "얼마", "available"))
         ):
-            if "may manh" in analysis_text or "powerful" in analysis_text:
+            return self._action("get_quota", "현재 할당량을 확인하겠습니다.")
+        if any(phrase in text for phrase in ("이미지 목록", "이미지 보여", "list image")):
+            return self._action("list_images", "사용 가능한 이미지 목록을 확인하겠습니다.")
+        if any(phrase in text for phrase in ("flavor 목록", "플레이버 목록", "list flavor")):
+            return self._action("list_flavors", "사용 가능한 flavor 목록을 확인하겠습니다.")
+        if any(phrase in analysis_text for phrase in create_phrases):
+            if any(phrase in analysis_text for phrase in ("강력한", "고성능", "powerful")):
                 return LLMDecision(
                     decision_type="clarification",
-                    message="Bạn sử dụng máy cho mục đích gì và có cần GPU không?",
+                    message="어떤 용도로 사용할 머신이며 GPU가 필요한가요?",
                 )
             cpu_match = re.search(r"(\d+)\s*(?:cpu|vcpu)", analysis_text)
             ram_match = re.search(r"(?:ram\s*)?(\d+)\s*gb(?:\s*ram)?", analysis_text)
             if not cpu_match or not ram_match:
                 return LLMDecision(
                     decision_type="clarification",
-                    message="Vui lòng cho biết số vCPU, dung lượng RAM và có cần GPU hay không.",
+                    message="vCPU 수, RAM 용량, GPU 필요 여부를 알려 주세요.",
                 )
             requires_gpu = None
-            if any(phrase in analysis_text for phrase in ("khong can gpu", "khong gpu", "no gpu")):
+            if any(phrase in analysis_text for phrase in ("gpu 필요 없", "gpu는 필요 없", "gpu 없이", "gpu 불필요", "no gpu")):
                 requires_gpu = False
             elif "gpu" in analysis_text:
                 requires_gpu = True
             else:
                 requires_gpu = False
-            name_match = re.search(r"(?:ten|name)\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})", analysis_text)
+            name_match = re.search(
+                r"(?:이름(?:은|을)?|name)\s*[:：]?\s*([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})",
+                analysis_text,
+            )
             version_match = re.search(r"\b(22\.04|24\.04)\b", analysis_text)
             version = version_match.group(1) if version_match else None
             default_message = (
-                " Bạn không nêu phiên bản Ubuntu nên tôi mặc định chọn Ubuntu 24.04."
+                " Ubuntu 버전을 지정하지 않아 Ubuntu 24.04를 기본으로 선택합니다."
                 if "ubuntu" in analysis_text and version is None
                 else ""
             )
             return self._action(
                 "plan_create_instance",
-                f"Tôi sẽ kiểm tra cấu hình phù hợp.{default_message}",
+                f"적합한 구성을 확인하겠습니다.{default_message}",
                 ActionParameters(
                     operating_system="ubuntu" if "ubuntu" in analysis_text else None,
                     operating_system_version=version,
@@ -123,18 +124,18 @@ class MockLLMClient(LLMClient):
                 ),
             )
         for action, phrases, reply in (
-            ("reboot_instance", ("khoi dong lai", "reboot", "restart instance"), "Tôi sẽ lập kế hoạch khởi động lại máy."),
-            ("start_instance", ("khoi dong", "start instance", "start may"), "Tôi sẽ lập kế hoạch khởi động máy."),
-            ("stop_instance", ("tat may", "stop instance", "stop may"), "Tôi sẽ lập kế hoạch tắt máy."),
+            ("reboot_instance", ("재부팅", "다시 시작", "reboot", "restart instance"), "머신 재부팅 계획을 준비하겠습니다."),
+            ("start_instance", ("시작", "켜 줘", "부팅", "start instance"), "머신 시작 계획을 준비하겠습니다."),
+            ("stop_instance", ("중지", "정지", "꺼 줘", "stop instance"), "머신 중지 계획을 준비하겠습니다."),
         ):
             if any(phrase in text for phrase in phrases):
                 name = _instance_name(message)
                 if not name:
-                    return LLMDecision(decision_type="clarification", message="Bạn muốn thao tác với máy nào?")
+                    return LLMDecision(decision_type="clarification", message="어떤 머신을 대상으로 작업할까요?")
                 return self._action(action, reply, ActionParameters(name=name))
         return LLMDecision(
             decision_type="answer",
-            message="Tôi có thể giúp xem máy, quota, image, flavor hoặc lập kế hoạch tạo, khởi động, tắt và reboot máy.",
+            message="가상 머신, 할당량, 이미지, flavor를 조회하거나 머신 생성, 시작, 중지, 재부팅 계획을 도와드릴 수 있습니다.",
         )
 
     @staticmethod
@@ -215,7 +216,7 @@ or target instance details. Extract Ubuntu 22.04 or 24.04 into operating_system_
 only says Ubuntu, leave operating_system_version null and explicitly say that Ubuntu 24.04 will be
 selected by default. Never output credentials, tokens, passwords, or private keys. Set
 requires_confirmation=false; the backend alone decides confirmation policy and performs verified work.
-Reply to users in Vietnamese unless their message uses another language."""
+Reply to users in Korean unless their message uses another language."""
 
 
 def create_llm_client() -> LLMClient:

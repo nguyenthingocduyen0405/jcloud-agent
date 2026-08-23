@@ -19,8 +19,8 @@ export function getOrCreateSessionId(
 function identityHeaders() {
   return {
     "X-Session-ID": getOrCreateSessionId(),
-  "X-User-ID": "mock-user",
-  "X-Project-ID": "mock-project",
+    "X-User-ID": "mock-user",
+    "X-Project-ID": "mock-project",
   };
 }
 
@@ -31,7 +31,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    throw new Error(body?.detail ?? `Yêu cầu thất bại (${response.status})`);
+    throw new Error(body?.detail ?? `요청에 실패했습니다 (${response.status})`);
   }
   return response.json() as Promise<T>;
 }

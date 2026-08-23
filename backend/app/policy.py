@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 
 
 ALLOWED_ACTIONS = frozenset({
@@ -24,17 +23,15 @@ MUTATING_ACTIONS = frozenset({
 
 
 def plain(text: str) -> str:
-    normalized = unicodedata.normalize("NFD", text.lower())
-    value = "".join(character for character in normalized if unicodedata.category(character) != "Mn")
-    return value.replace("đ", "d")
+    return text.lower().strip()
 
 
 def is_prohibited_request(text: str) -> bool:
     value = plain(text)
     prohibited = (
-        "xoa instance",
-        "xoa may",
-        "xoa tat ca",
+        "인스턴스 삭제",
+        "머신 삭제",
+        "모두 삭제",
         "delete instance",
         "delete all",
         "shell",
@@ -42,9 +39,9 @@ def is_prohibited_request(text: str) -> bool:
         "cmd.exe",
         "controller node",
         "compute node",
-        "network dung chung",
+        "공유 네트워크",
         "shared network",
-        "mo toan bo firewall",
+        "방화벽 전체 개방",
         "open all firewall",
         "0.0.0.0/0",
     )
@@ -54,8 +51,7 @@ def is_prohibited_request(text: str) -> bool:
 def contains_sensitive_value(text: str) -> bool:
     value = plain(text)
     patterns = (
-        r"(?:api[_ -]?key|token|password|mat khau|private key)\s*[:=]\s*\S+",
+        r"(?:api[_ -]?key|token|password|비밀번호|암호|private key)\s*[:=]\s*\S+",
         r"-----begin (?:rsa |ec |openssh )?private key-----",
     )
     return any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
-

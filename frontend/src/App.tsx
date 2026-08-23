@@ -4,19 +4,19 @@ import type { ChatMessage, ConversationContextMessage, Operation } from "./types
 import "./styles.css";
 
 const suggestions = [
-  "Liệt kê máy của tôi",
-  "Tôi còn bao nhiêu CPU và RAM?",
-  "Tạo máy Ubuntu 4 CPU, RAM 16 GB",
-  "Khởi động máy test-01",
+  "내 가상 머신 목록 보여 줘",
+  "CPU와 RAM이 얼마나 남았어?",
+  "Ubuntu 24.04, CPU 4개, RAM 16 GB 머신 생성",
+  "test-01 머신 시작",
 ];
 
 export const initialMessage: ChatMessage = {
   id: "welcome",
   role: "assistant",
-  text: "Xin chào. Tôi là JCloud Agent chạy với dữ liệu giả lập. Tôi có thể liệt kê máy, kiểm tra quota và lập kế hoạch tạo, khởi động hoặc tắt máy.",
+  text: "안녕하세요. 모의 데이터로 실행되는 JCloud Agent입니다. 가상 머신 목록과 할당량을 확인하고 머신 생성, 시작 또는 중지 계획을 준비할 수 있습니다.",
 };
 
-const sensitiveValuePattern = /(?:api[_ -]?key|token|password|mật khẩu|private key)\s*[:=]\s*\S+/i;
+const sensitiveValuePattern = /(?:api[_ -]?key|token|password|비밀번호|암호|private key)\s*[:=]\s*\S+/i;
 type ConnectionStatus = "connecting" | "ready" | "failed";
 
 export function buildConversationContext(messages: ChatMessage[]): ConversationContextMessage[] {
@@ -28,11 +28,11 @@ export function buildConversationContext(messages: ChatMessage[]): ConversationC
 
 function Status({ value }: { value: Operation["status"] }) {
   const labels: Record<Operation["status"], string> = {
-    waiting_for_confirmation: "Chờ xác nhận",
-    running: "Đang chạy",
-    completed: "Hoàn thành",
-    failed: "Thất bại",
-    cancelled: "Đã hủy",
+    waiting_for_confirmation: "확인 대기",
+    running: "실행 중",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소됨",
   };
   return <span className={`status status--${value}`}>{labels[value]}</span>;
 }
@@ -60,8 +60,8 @@ function DataPreview({ data }: { data: unknown }) {
   if ("available_vcpus" in quota) {
     return (
       <div className="quota">
-        <div><strong>{String(quota.available_vcpus)}</strong><span>vCPU còn lại</span></div>
-        <div><strong>{String(quota.available_ram_gb)} GB</strong><span>RAM còn lại</span></div>
+        <div><strong>{String(quota.available_vcpus)}</strong><span>사용 가능한 vCPU</span></div>
+        <div><strong>{String(quota.available_ram_gb)} GB</strong><span>사용 가능한 RAM</span></div>
       </div>
     );
   }
@@ -70,11 +70,11 @@ function DataPreview({ data }: { data: unknown }) {
 
 export function OperationDetails({ payload }: { payload: Operation["payload"] }) {
   const details = [
-    ["Tên máy", payload.name],
-    ["Hệ điều hành", payload.image ?? payload.operating_system],
+    ["머신 이름", payload.name],
+    ["운영체제", payload.image ?? payload.operating_system],
     ["CPU", payload.vcpus === undefined ? undefined : `${String(payload.vcpus)} vCPU`],
     ["RAM", payload.ram_gb === undefined ? undefined : `${String(payload.ram_gb)} GB`],
-    ["GPU", payload.requires_gpu === undefined ? undefined : payload.requires_gpu ? "Có" : "Không"],
+    ["GPU", payload.requires_gpu === undefined ? undefined : payload.requires_gpu ? "필요" : "불필요"],
     ["Flavor", payload.flavor],
   ].filter((detail): detail is [string, unknown] => detail[1] !== undefined && detail[1] !== null);
 
@@ -102,7 +102,7 @@ export default function App() {
 
     try {
       const health = await checkBackend(controller.signal);
-      if (health.status !== "ok") throw new Error("Backend chưa sẵn sàng");
+      if (health.status !== "ok") throw new Error("백엔드가 아직 준비되지 않았습니다.");
       if (attempt === connectionAttemptRef.current) setConnectionStatus("ready");
     } catch {
       if (attempt === connectionAttemptRef.current) setConnectionStatus("failed");
@@ -135,7 +135,7 @@ export default function App() {
     } catch (error) {
       setMessages((current) => [
         ...current,
-        { id: crypto.randomUUID(), role: "assistant", text: error instanceof Error ? error.message : "Không thể kết nối backend." },
+        { id: crypto.randomUUID(), role: "assistant", text: error instanceof Error ? error.message : "백엔드에 연결할 수 없습니다." },
       ]);
     } finally {
       setBusy(false);
@@ -155,7 +155,7 @@ export default function App() {
       setMessages((current) => [...current, {
         id: crypto.randomUUID(),
         role: "assistant",
-        text: updated.status === "completed" ? "Thao tác giả lập đã hoàn thành." : "Kế hoạch đã được hủy.",
+        text: updated.status === "completed" ? "모의 작업이 완료되었습니다." : "계획이 취소되었습니다.",
         data: updated.result,
       }]);
     } catch (error) {
@@ -175,12 +175,12 @@ export default function App() {
   function startNewConversation() {
     setMessages([initialMessage]);
     setInput("");
-    setSandboxNotice("Đã bắt đầu cuộc trò chuyện mới. Dữ liệu sandbox không thay đổi.");
+    setSandboxNotice("새 대화를 시작했습니다. Sandbox 데이터는 변경되지 않았습니다.");
   }
 
   async function handleResetSandbox() {
     const confirmed = window.confirm(
-      "Reset sandbox chỉ xóa máy ảo và kế hoạch mô phỏng của phiên trình duyệt hiện tại. Bạn có muốn tiếp tục?",
+      "Sandbox 초기화는 현재 브라우저 세션의 모의 가상 머신과 작업 계획만 삭제합니다. 계속할까요?",
     );
     if (!confirmed) return;
 
@@ -190,9 +190,9 @@ export default function App() {
       await resetSandbox();
       setMessages([initialMessage]);
       setInput("");
-      setSandboxNotice("Sandbox đã được reset về hai máy mặc định: web-demo và test-01.");
+      setSandboxNotice("Sandbox가 기본 머신 두 대(web-demo, test-01)로 초기화되었습니다.");
     } catch (error) {
-      setSandboxNotice(error instanceof Error ? error.message : "Không thể reset sandbox.");
+      setSandboxNotice(error instanceof Error ? error.message : "Sandbox를 초기화할 수 없습니다.");
     } finally {
       setBusy(false);
     }
@@ -204,45 +204,45 @@ export default function App() {
         <div className="brand"><span className="brand__mark">JC</span><div><strong>JCloud Agent</strong><small>Mock environment</small></div></div>
         <div className={`environment environment--${connectionStatus}`} aria-live="polite">
           <span className="pulse" />
-          {connectionStatus === "connecting" && "Đang kết nối..."}
-          {connectionStatus === "ready" && "Sandbox sẵn sàng"}
-          {connectionStatus === "failed" && "Mất kết nối"}
+          {connectionStatus === "connecting" && "연결 중..."}
+          {connectionStatus === "ready" && "Sandbox 준비 완료"}
+          {connectionStatus === "failed" && "연결 끊김"}
         </div>
         <div className="sidebar__copy">
-          <h2>An toàn từ thiết kế</h2>
-          <p>AI chỉ hiểu yêu cầu và lập kế hoạch. Backend kiểm tra rồi chỉ thực thi sau khi bạn xác nhận.</p>
+          <h2>안전을 고려한 설계</h2>
+          <p>AI는 요청을 이해하고 계획만 작성합니다. 백엔드가 검증하며 사용자가 확인한 후에만 실행합니다.</p>
         </div>
         <div className="guardrails">
-          <span>Không có credential</span><span>Không gọi OpenStack thật</span><span>Không chạy shell</span>
+          <span>Credential 미사용</span><span>실제 OpenStack 미연결</span><span>Shell 실행 금지</span>
         </div>
       </aside>
 
       <section className="chat">
         <header>
-          <div><span className="eyebrow">CONTROL PLANE ASSISTANT</span><h1>Quản lý cloud bằng hội thoại</h1></div>
+          <div><span className="eyebrow">CONTROL PLANE ASSISTANT</span><h1>대화형 클라우드 관리</h1></div>
           <div className="header-actions">
-            <button type="button" onClick={startNewConversation} disabled={busy}>Cuộc trò chuyện mới</button>
-            <button type="button" className="reset-button" onClick={() => void handleResetSandbox()} disabled={busy || connectionStatus !== "ready"}>Reset sandbox</button>
+            <button type="button" onClick={startNewConversation} disabled={busy}>새 대화</button>
+            <button type="button" className="reset-button" onClick={() => void handleResetSandbox()} disabled={busy || connectionStatus !== "ready"}>Sandbox 초기화</button>
             <span className="mode">MOCK MODE</span>
           </div>
         </header>
         <div className="messages" aria-live="polite">
           {messages.map((message) => (
             <article key={message.id} className={`message message--${message.role}`}>
-              <div className="message__label">{message.role === "user" ? "Bạn" : "Agent"}</div>
+              <div className="message__label">{message.role === "user" ? "사용자" : "Agent"}</div>
               <div className="bubble">
                 <p>{message.text}</p>
                 <DataPreview data={message.data} />
                 {message.operation && (
                   <div className="operation">
-                    <div className="operation__top"><span>KẾ HOẠCH THAO TÁC</span><Status value={message.operation.status} /></div>
+                    <div className="operation__top"><span>작업 계획</span><Status value={message.operation.status} /></div>
                     <h3>{message.operation.summary}</h3>
                     <OperationDetails payload={message.operation.payload} />
                     {message.operation.error && <p className="error">{message.operation.error}</p>}
                     {message.operation.status === "waiting_for_confirmation" && (
                       <div className="actions">
-                        <button className="button button--primary" onClick={() => void handleDecision(message.id, message.operation!, "confirm")}>Xác nhận</button>
-                        <button className="button button--ghost" onClick={() => void handleDecision(message.id, message.operation!, "cancel")}>Hủy</button>
+                        <button className="button button--primary" onClick={() => void handleDecision(message.id, message.operation!, "confirm")}>확인</button>
+                        <button className="button button--ghost" onClick={() => void handleDecision(message.id, message.operation!, "cancel")}>취소</button>
                       </div>
                     )}
                   </div>
@@ -260,29 +260,29 @@ export default function App() {
               <span className="connection__indicator" aria-hidden="true" />
               <div>
                 <strong>
-                  {connectionStatus === "connecting" && "Đang kết nối tới sandbox..."}
-                  {connectionStatus === "ready" && "Sandbox sẵn sàng"}
-                  {connectionStatus === "failed" && "Không thể kết nối tới sandbox"}
+                  {connectionStatus === "connecting" && "Sandbox에 연결 중..."}
+                  {connectionStatus === "ready" && "Sandbox 준비 완료"}
+                  {connectionStatus === "failed" && "Sandbox에 연결할 수 없습니다"}
                 </strong>
-                {connectionStatus === "connecting" && <small>Lần khởi động đầu tiên có thể mất khoảng một phút.</small>}
-                {connectionStatus === "failed" && <small>Backend chưa phản hồi. Vui lòng thử kết nối lại.</small>}
+                {connectionStatus === "connecting" && <small>첫 시작에는 약 1분이 걸릴 수 있습니다.</small>}
+                {connectionStatus === "failed" && <small>백엔드가 응답하지 않습니다. 다시 연결해 주세요.</small>}
               </div>
             </div>
-            {connectionStatus === "failed" && <button type="button" onClick={() => void connect()}>Thử lại</button>}
+            {connectionStatus === "failed" && <button type="button" onClick={() => void connect()}>다시 시도</button>}
           </div>
           <div className="suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => void submit(suggestion)} disabled={busy || connectionStatus !== "ready"}>{suggestion}</button>)}</div>
           <form className="composer" onSubmit={onSubmit}>
             <input
-              aria-label="Yêu cầu quản lý máy ảo"
+              aria-label="가상 머신 관리 요청"
               maxLength={500}
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder={connectionStatus === "ready" ? "Nhập yêu cầu, ví dụ: Tạo máy Ubuntu 4 CPU, RAM 16 GB" : "Đang chờ kết nối tới sandbox..."}
+              placeholder={connectionStatus === "ready" ? "요청 입력 (예: Ubuntu 24.04, CPU 4개, RAM 16 GB 머신 생성)" : "Sandbox 연결을 기다리는 중..."}
               disabled={busy || connectionStatus !== "ready"}
             />
-            <button type="submit" disabled={busy || connectionStatus !== "ready" || !input.trim()} aria-label="Gửi">→</button>
+            <button type="submit" disabled={busy || connectionStatus !== "ready" || !input.trim()} aria-label="전송">→</button>
           </form>
-          <small className="disclaimer">Mọi thay đổi đều yêu cầu xác nhận · Dữ liệu chỉ là giả lập</small>
+          <small className="disclaimer">모든 변경 작업은 확인 필요 · 모의 데이터만 사용</small>
         </div>
       </section>
     </main>
