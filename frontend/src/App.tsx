@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { checkBackend, decideOperation, sendMessage } from "./api";
+import { checkBackend, decideOperation, resetSandbox, sendMessage } from "./api";
 import type { ChatMessage, ConversationContextMessage, Operation } from "./types";
 import "./styles.css";
 
@@ -10,7 +10,7 @@ const suggestions = [
   "Khởi động máy test-01",
 ];
 
-const initialMessage: ChatMessage = {
+export const initialMessage: ChatMessage = {
   id: "welcome",
   role: "assistant",
   text: "Xin chào. Tôi là JCloud Agent chạy với dữ liệu giả lập. Tôi có thể liệt kê máy, kiểm tra quota và lập kế hoạch tạo, khởi động hoặc tắt máy.",
@@ -68,13 +68,14 @@ function DataPreview({ data }: { data: unknown }) {
   return null;
 }
 
-function OperationDetails({ payload }: { payload: Operation["payload"] }) {
+export function OperationDetails({ payload }: { payload: Operation["payload"] }) {
   const details = [
     ["Tên máy", payload.name],
     ["Hệ điều hành", payload.image ?? payload.operating_system],
     ["CPU", payload.vcpus === undefined ? undefined : `${String(payload.vcpus)} vCPU`],
     ["RAM", payload.ram_gb === undefined ? undefined : `${String(payload.ram_gb)} GB`],
     ["GPU", payload.requires_gpu === undefined ? undefined : payload.requires_gpu ? "Có" : "Không"],
+    ["Flavor", payload.flavor],
   ].filter((detail): detail is [string, unknown] => detail[1] !== undefined && detail[1] !== null);
 
   return (
@@ -89,6 +90,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
+  const [sandboxNotice, setSandboxNotice] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const connectionAttemptRef = useRef(0);
 
@@ -170,6 +172,32 @@ export default function App() {
     void submit(input);
   }
 
+  function startNewConversation() {
+    setMessages([initialMessage]);
+    setInput("");
+    setSandboxNotice("Đã bắt đầu cuộc trò chuyện mới. Dữ liệu sandbox không thay đổi.");
+  }
+
+  async function handleResetSandbox() {
+    const confirmed = window.confirm(
+      "Reset sandbox chỉ xóa máy ảo và kế hoạch mô phỏng của phiên trình duyệt hiện tại. Bạn có muốn tiếp tục?",
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    setSandboxNotice(null);
+    try {
+      await resetSandbox();
+      setMessages([initialMessage]);
+      setInput("");
+      setSandboxNotice("Sandbox đã được reset về hai máy mặc định: web-demo và test-01.");
+    } catch (error) {
+      setSandboxNotice(error instanceof Error ? error.message : "Không thể reset sandbox.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -192,7 +220,11 @@ export default function App() {
       <section className="chat">
         <header>
           <div><span className="eyebrow">CONTROL PLANE ASSISTANT</span><h1>Quản lý cloud bằng hội thoại</h1></div>
-          <span className="mode">MOCK MODE</span>
+          <div className="header-actions">
+            <button type="button" onClick={startNewConversation} disabled={busy}>Cuộc trò chuyện mới</button>
+            <button type="button" className="reset-button" onClick={() => void handleResetSandbox()} disabled={busy || connectionStatus !== "ready"}>Reset sandbox</button>
+            <span className="mode">MOCK MODE</span>
+          </div>
         </header>
         <div className="messages" aria-live="polite">
           {messages.map((message) => (
@@ -222,6 +254,7 @@ export default function App() {
           <div ref={endRef} />
         </div>
         <div className="composer-area">
+          {sandboxNotice && <div className="sandbox-notice" role="status">{sandboxNotice}</div>}
           <div className={`connection connection--${connectionStatus}`} role="status" aria-live="polite">
             <div className="connection__message">
               <span className="connection__indicator" aria-hidden="true" />

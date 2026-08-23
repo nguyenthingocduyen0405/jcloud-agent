@@ -1,5 +1,6 @@
 import threading
 import time
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,8 @@ OTHER_USER_HEADERS = {
     "X-User-ID": "other-user",
     "X-Project-ID": "mock-project",
 }
+SESSION_A_HEADERS = {**MOCK_HEADERS, "X-Session-ID": "session-a"}
+SESSION_B_HEADERS = {**MOCK_HEADERS, "X-Session-ID": "session-b"}
 
 
 def client(
@@ -35,7 +38,8 @@ def client(
             str(tmp_path / "test.db"),
             llm_client=llm_client or MockLLMClient(),
             cloud_client=cloud_client,
-        )
+        ),
+        headers=MOCK_HEADERS,
     )
 
 
@@ -78,7 +82,8 @@ def test_create_requires_confirmation_and_uses_verified_metadata(tmp_path):
         assert response.status_code == 200
         operation = response.json()["operation"]
         assert operation["status"] == "waiting_for_confirmation"
-        assert operation["payload"]["image_id"] == "img-ubuntu-2204"
+        assert operation["payload"]["image_id"] == "img-ubuntu-2404"
+        assert "mặc định chọn Ubuntu 24.04" in response.json()["message"]
         assert operation["payload"]["flavor_id"] == "flavor-large"
         assert len(api.get("/api/instances").json()) == 2
 
@@ -249,17 +254,168 @@ def test_operation_is_hidden_from_other_users(tmp_path):
         assert api.get(operation_url, headers=MOCK_HEADERS).status_code == 200
 
 
+def create_and_confirm(api: TestClient, headers: dict[str, str], message: str) -> dict[str, Any]:
+    planned = api.post("/api/chat", headers=headers, json={"message": message}).json()
+    operation = planned["operation"]
+    assert operation is not None
+    confirmed = api.post(f"/api/operations/{operation['id']}/confirm", headers=headers)
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "completed"
+    return operation
+
+
+def test_sessions_receive_independent_seed_data_and_quota(tmp_path):
+    with client(tmp_path) as api:
+        instances_a = api.get("/api/instances", headers=SESSION_A_HEADERS).json()
+        instances_b = api.get("/api/instances", headers=SESSION_B_HEADERS).json()
+
+        assert {item["name"] for item in instances_a} == {"web-demo", "test-01"}
+        assert {item["name"] for item in instances_b} == {"web-demo", "test-01"}
+        assert {item["id"] for item in instances_a}.isdisjoint(
+            {item["id"] for item in instances_b}
+        )
+        assert api.get("/api/quota", headers=SESSION_A_HEADERS).json()["used_vcpus"] == 3
+        assert api.get("/api/quota", headers=SESSION_B_HEADERS).json()["used_vcpus"] == 3
+
+
+def test_instance_and_quota_are_isolated_by_session(tmp_path):
+    with client(tmp_path) as api:
+        create_and_confirm(
+            api,
+            SESSION_A_HEADERS,
+            "Tạo Ubuntu 24.04 4 CPU và 16 GB RAM tên private-vm.",
+        )
+
+        names_a = {item["name"] for item in api.get("/api/instances", headers=SESSION_A_HEADERS).json()}
+        names_b = {item["name"] for item in api.get("/api/instances", headers=SESSION_B_HEADERS).json()}
+        assert "private-vm" in names_a
+        assert "private-vm" not in names_b
+        assert api.get("/api/quota", headers=SESSION_A_HEADERS).json()["used_vcpus"] == 7
+        assert api.get("/api/quota", headers=SESSION_B_HEADERS).json()["used_vcpus"] == 3
+
+        for message in (
+            "Khởi động máy private-vm",
+            "Tắt máy private-vm",
+            "Khởi động lại máy private-vm",
+        ):
+            blocked = api.post(
+                "/api/chat", headers=SESSION_B_HEADERS, json={"message": message}
+            ).json()
+            assert blocked["operation"] is None
+
+
+def test_sessions_can_use_same_instance_name_and_cannot_access_operations(tmp_path):
+    with client(tmp_path) as api:
+        operation_a = create_and_confirm(
+            api, SESSION_A_HEADERS, "Tạo Ubuntu 4 CPU và 16 GB RAM."
+        )
+        create_and_confirm(api, SESSION_B_HEADERS, "Tạo Ubuntu 4 CPU và 16 GB RAM.")
+
+        assert "ubuntu-demo" in {
+            item["name"] for item in api.get("/api/instances", headers=SESSION_A_HEADERS).json()
+        }
+        assert "ubuntu-demo" in {
+            item["name"] for item in api.get("/api/instances", headers=SESSION_B_HEADERS).json()
+        }
+        operation_url = f"/api/operations/{operation_a['id']}"
+        assert api.get(operation_url, headers=SESSION_B_HEADERS).status_code == 404
+        assert api.post(f"{operation_url}/confirm", headers=SESSION_B_HEADERS).status_code == 404
+        assert api.post(f"{operation_url}/cancel", headers=SESSION_B_HEADERS).status_code == 404
+
+
+def test_reset_only_changes_current_session(tmp_path):
+    with client(tmp_path) as api:
+        operation_a = create_and_confirm(
+            api, SESSION_A_HEADERS, "Tạo Ubuntu 22.04 4 CPU và 16 GB RAM tên only-a."
+        )
+        operation_b = create_and_confirm(
+            api, SESSION_B_HEADERS, "Tạo Ubuntu 24.04 4 CPU và 16 GB RAM tên only-b."
+        )
+
+        reset = api.post("/api/sandbox/reset", headers=SESSION_A_HEADERS)
+        assert reset.status_code == 200
+        assert reset.json()["status"] == "reset"
+        assert {item["name"] for item in reset.json()["instances"]} == {"web-demo", "test-01"}
+        assert {item["name"] for item in api.get("/api/instances", headers=SESSION_A_HEADERS).json()} == {
+            "web-demo",
+            "test-01",
+        }
+        assert "only-b" in {
+            item["name"] for item in api.get("/api/instances", headers=SESSION_B_HEADERS).json()
+        }
+        assert api.get(
+            f"/api/operations/{operation_a['id']}", headers=SESSION_A_HEADERS
+        ).status_code == 404
+        assert api.get(
+            f"/api/operations/{operation_b['id']}", headers=SESSION_B_HEADERS
+        ).status_code == 200
+
+
+def test_ubuntu_version_selection(tmp_path):
+    cases = (
+        ("Tạo Ubuntu 22.04 4 CPU và 16 GB RAM.", "img-ubuntu-2204", "Ubuntu 22.04"),
+        ("Tạo Ubuntu 24.04 4 CPU và 16 GB RAM.", "img-ubuntu-2404", "Ubuntu 24.04"),
+        ("Tạo Ubuntu 4 CPU và 16 GB RAM.", "img-ubuntu-2404", "Ubuntu 24.04"),
+    )
+    for index, (message, image_id, image_name) in enumerate(cases):
+        headers = {**MOCK_HEADERS, "X-Session-ID": f"ubuntu-version-{index}"}
+        with client(tmp_path) as api:
+            response = api.post("/api/chat", headers=headers, json={"message": message}).json()
+            assert response["operation"]["payload"]["image_id"] == image_id
+            assert response["operation"]["payload"]["image"] == image_name
+            if index == 2:
+                assert "mặc định chọn Ubuntu 24.04" in response["message"]
+
+
+def test_legacy_instance_schema_is_migrated_without_data_loss(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE instances (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                image TEXT NOT NULL,
+                vcpus INTEGER NOT NULL,
+                ram_gb INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO instances VALUES
+                ('legacy-vm', 'legacy-name', 'Ubuntu 22.04', 1, 2, 'ACTIVE', '2026-01-01');
+            """
+        )
+
+    repository = Repository(str(database_path))
+    repository.initialize()
+    assert repository.get_instance("mock-session", "legacy-name") is not None
+    repository.ensure_session("another-session")
+    repository.create_instance(
+        "another-session",
+        {
+            "id": "another-vm",
+            "name": "legacy-name",
+            "image": "Ubuntu 24.04",
+            "vcpus": 1,
+            "ram_gb": 2,
+            "status": "ACTIVE",
+            "created_at": "2026-01-02",
+        },
+    )
+    assert repository.get_instance("another-session", "legacy-name") is not None
+
+
 class CountingMockCloudClient(MockCloudClient):
     def __init__(self, repository: Repository) -> None:
         super().__init__(repository)
         self.stop_calls = 0
         self._count_lock = threading.Lock()
 
-    def stop_instance(self, name: str) -> dict[str, Any]:
+    def stop_instance(self, session_id: str, name: str) -> dict[str, Any]:
         with self._count_lock:
             self.stop_calls += 1
         time.sleep(0.1)
-        return super().stop_instance(name)
+        return super().stop_instance(session_id, name)
 
 
 def test_concurrent_confirmation_executes_cloud_once(tmp_path):

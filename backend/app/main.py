@@ -22,11 +22,12 @@ from .schemas import (
     LLMDecision,
     Operation,
     RequestIdentity,
+    SandboxResetResponse,
 )
 
 
 def get_request_identity(
-    session_id: Annotated[str, Header(alias="X-Session-ID")] = "mock-session",
+    session_id: Annotated[str, Header(alias="X-Session-ID")],
     user_id: Annotated[str, Header(alias="X-User-ID")] = "mock-user",
     project_id: Annotated[str, Header(alias="X-Project-ID")] = "mock-project",
 ) -> RequestIdentity:
@@ -61,7 +62,7 @@ def create_app(
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "X-Session-ID", "X-User-ID", "X-Project-ID"],
     )
 
     @application.get("/api/health")
@@ -69,12 +70,17 @@ def create_app(
         return {"status": "ok", "cloud": "mock", "llm_provider": llm_provider}
 
     @application.get("/api/instances")
-    def list_instances() -> list[dict]:
-        return cloud.list_instances()
+    def list_instances(identity: IdentityDependency) -> list[dict]:
+        return cloud.list_instances(identity.session_id)
 
     @application.get("/api/quota")
-    def get_quota() -> dict[str, int]:
-        return cloud.get_quota()
+    def get_quota(identity: IdentityDependency) -> dict[str, int]:
+        return cloud.get_quota(identity.session_id)
+
+    @application.post("/api/sandbox/reset", response_model=SandboxResetResponse)
+    def reset_sandbox(identity: IdentityDependency) -> SandboxResetResponse:
+        instances = cloud.reset_sandbox(identity.session_id)
+        return SandboxResetResponse(status="reset", instances=instances)
 
     @application.post("/api/chat", response_model=ChatResponse)
     def chat(request: ChatRequest, identity: IdentityDependency) -> ChatResponse:
@@ -91,16 +97,22 @@ def create_app(
             )
 
         cloud_context = {
-            "quota": cloud.get_quota(),
+            "quota": cloud.get_quota(identity.session_id),
             "images": [
-                {"name": image["name"], "operating_system": image["operating_system"]}
+                {
+                    "name": image["name"],
+                    "operating_system": image["operating_system"],
+                    "version": image["version"],
+                }
                 for image in cloud.list_images()
             ],
             "flavors": [
                 {"name": flavor["name"], "vcpus": flavor["vcpus"], "ram_gb": flavor["ram_gb"]}
                 for flavor in cloud.list_flavors()
             ],
-            "instance_names": [instance["name"] for instance in cloud.list_instances()],
+            "instance_names": [
+                instance["name"] for instance in cloud.list_instances(identity.session_id)
+            ],
         }
         try:
             raw_decision = llm.parse_message(
@@ -120,10 +132,10 @@ def create_app(
             return ChatResponse(message="Thao tác này chưa được hỗ trợ.")
 
         if decision.action == "list_instances":
-            instances = cloud.list_instances()
+            instances = cloud.list_instances(identity.session_id)
             return ChatResponse(message=decision.message, data=instances)
         if decision.action == "get_quota":
-            quota = cloud.get_quota()
+            quota = cloud.get_quota(identity.session_id)
             message = f"Còn {quota['available_vcpus']} vCPU và {quota['available_ram_gb']} GB RAM."
             return ChatResponse(message=message, data=quota)
         if decision.action == "list_images":
@@ -133,10 +145,18 @@ def create_app(
         if decision.action not in MUTATING_ACTIONS:
             return ChatResponse(message="Thao tác này chưa được hỗ trợ.")
 
+        response_message = decision.message
         try:
             if decision.action == "plan_create_instance":
+                uses_default_ubuntu = (
+                    decision.parameters.operating_system is not None
+                    and decision.parameters.operating_system.strip().lower() == "ubuntu"
+                    and decision.parameters.operating_system_version is None
+                )
                 payload = resolve_instance_plan(decision.parameters, cloud)
-                cloud.plan_create_instance(payload)
+                cloud.plan_create_instance(identity.session_id, payload)
+                if uses_default_ubuntu and "24.04" not in response_message:
+                    response_message += " Bạn không nêu phiên bản Ubuntu nên tôi mặc định chọn Ubuntu 24.04."
                 summary = (
                     f"Tạo {payload['name']} với {payload['image']}, "
                     f"{payload['vcpus']} vCPU và {payload['ram_gb']} GB RAM"
@@ -146,7 +166,7 @@ def create_app(
                 name = decision.parameters.name
                 if not name:
                     return ChatResponse(message="Bạn muốn thao tác với máy nào?")
-                if not repository.get_instance(name):
+                if not repository.get_instance(identity.session_id, name):
                     raise ValueError(f"Không tìm thấy máy '{name}'")
                 operation_action = decision.action
                 payload = {"name": name}
@@ -177,7 +197,7 @@ def create_app(
             }
         )
         return ChatResponse(
-            message=f"{decision.message} Kế hoạch đã sẵn sàng; vui lòng xác nhận trước khi thực hiện.",
+            message=f"{response_message} Kế hoạch đã sẵn sàng; vui lòng xác nhận trước khi thực hiện.",
             operation=Operation.model_validate(operation),
         )
 
@@ -185,6 +205,7 @@ def create_app(
     def get_operation(operation_id: str, identity: IdentityDependency) -> Operation:
         operation = repository.get_operation(
             operation_id,
+            session_id=identity.session_id,
             user_id=identity.user_id,
             project_id=identity.project_id,
         )
@@ -196,6 +217,7 @@ def create_app(
     def confirm_operation(operation_id: str, identity: IdentityDependency) -> Operation:
         owned_operation = repository.get_operation(
             operation_id,
+            session_id=identity.session_id,
             user_id=identity.user_id,
             project_id=identity.project_id,
         )
@@ -203,6 +225,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Operation not found")
         operation = repository.claim_operation(
             operation_id,
+            session_id=identity.session_id,
             user_id=identity.user_id,
             project_id=identity.project_id,
         )
@@ -210,24 +233,39 @@ def create_app(
             raise HTTPException(status_code=409, detail="Operation is no longer awaiting confirmation")
         try:
             if operation["action"] == "create_instance":
-                result = cloud.create_instance(operation["payload"])
+                result = cloud.create_instance(identity.session_id, operation["payload"])
             elif operation["action"] == "start_instance":
-                result = cloud.start_instance(operation["payload"]["name"])
+                result = cloud.start_instance(identity.session_id, operation["payload"]["name"])
             elif operation["action"] == "stop_instance":
-                result = cloud.stop_instance(operation["payload"]["name"])
+                result = cloud.stop_instance(identity.session_id, operation["payload"]["name"])
             elif operation["action"] == "reboot_instance":
-                result = cloud.reboot_instance(operation["payload"]["name"])
+                result = cloud.reboot_instance(identity.session_id, operation["payload"]["name"])
             else:
                 raise ValueError("Operation action is not allowed")
-            updated = repository.update_operation(operation_id, "completed", result=result)
+            updated = repository.update_operation(
+                operation_id,
+                "completed",
+                session_id=identity.session_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+                result=result,
+            )
         except ValueError as exc:
-            updated = repository.update_operation(operation_id, "failed", error=str(exc))
+            updated = repository.update_operation(
+                operation_id,
+                "failed",
+                session_id=identity.session_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+                error=str(exc),
+            )
         return Operation.model_validate(updated)
 
     @application.post("/api/operations/{operation_id}/cancel", response_model=Operation)
     def cancel_operation(operation_id: str, identity: IdentityDependency) -> Operation:
         owned_operation = repository.get_operation(
             operation_id,
+            session_id=identity.session_id,
             user_id=identity.user_id,
             project_id=identity.project_id,
         )
@@ -235,6 +273,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Operation not found")
         updated = repository.cancel_operation(
             operation_id,
+            session_id=identity.session_id,
             user_id=identity.user_id,
             project_id=identity.project_id,
         )
@@ -256,8 +295,16 @@ def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> d
         raise ValueError("GPU chưa được hỗ trợ trong MVP này.")
 
     os_name = parameters.operating_system.strip().lower()
+    requested_version = parameters.operating_system_version
+    if os_name == "ubuntu" and requested_version is None:
+        requested_version = "24.04"
     image = next(
-        (item for item in cloud.list_images() if item["operating_system"].lower() == os_name),
+        (
+            item
+            for item in cloud.list_images()
+            if item["operating_system"].lower() == os_name
+            and (requested_version is None or item.get("version") == requested_version)
+        ),
         None,
     )
     if not image:

@@ -137,17 +137,24 @@ LLM_TIMEOUT_SECONDS=15
 LLM_MAX_OUTPUT_TOKENS=500
 ```
 
-프런트엔드는 현재 메시지를 제외한 최근 대화 텍스트를 최대 10개까지 `conversation_context`로 전송합니다. operation payload와 민감한 값은 대화 context에 포함하지 않습니다.
+프런트엔드는 현재 메시지를 제외한 최근 대화 텍스트를 최대 10개까지 `conversation_context`로 전송합니다. operation payload와 민감한 값은 대화 context에 포함하지 않습니다. Ubuntu 버전을 생략하면 백엔드는 검증된 `Ubuntu 24.04` image를 기본으로 선택하고, 사용자 응답에도 기본 선택임을 명시합니다. `Ubuntu 22.04` 또는 `Ubuntu 24.04`를 지정하면 해당 버전과 정확히 일치하는 image만 사용합니다.
 
-## 모의 사용자 및 프로젝트
+## 브라우저 세션과 모의 격리
 
-Keystone은 아직 연동하지 않았습니다. 로컬 mock 모드에서는 다음 HTTP header를 고정 identity로 사용합니다.
+첫 방문 시 프런트엔드는 무작위 UUID를 생성하여 브라우저의 `localStorage`에 `jcloud_agent_session_id`라는 이름으로 저장합니다. 새로고침해도 같은 UUID를 재사용하며 모든 백엔드 요청에 `X-Session-ID`로 전달합니다. 이 값은 화면이나 일반 로그에 표시하지 않습니다.
 
-- `X-Session-ID: mock-session`
 - `X-User-ID: mock-user`
 - `X-Project-ID: mock-project`
 
-operation에는 session, user, project가 기록됩니다. 다른 user/project의 operation은 조회, 취소 또는 확인할 수 없습니다.
+Mock 모드의 instance, 사용 quota, operation은 session별로 분리됩니다. 각 새 session에는 `web-demo`와 `test-01`이 별도로 생성됩니다. 다른 session의 instance와 operation은 조회하거나 변경할 수 없습니다. 단, 이 UUID 격리는 데모 sandbox의 데이터 분리 기능일 뿐이며 인증이나 권한 부여가 아닙니다. 실제 서비스에서는 Keystone 또는 별도의 신뢰할 수 있는 인증 계층이 필요합니다.
+
+화면의 **새 대화**는 프런트엔드 대화 기록만 초기화하며 instance, quota, operation은 변경하지 않습니다. **Reset sandbox**는 확인 창을 거쳐 현재 브라우저 session의 모의 instance와 operation만 삭제하고 기본 VM 두 개를 다시 생성합니다.
+
+## SQLite 스키마 업그레이드
+
+백엔드 시작 시 기존 `instances` 테이블에 전역 `UNIQUE(name)` 제약이 있으면 자동 migration을 수행합니다. 기존 행은 손실 없이 `mock-session`에 귀속시키고 테이블을 `UNIQUE(session_id, name)` 구조로 교체합니다. 이후 브라우저 UUID session은 각각 독립된 기본 데이터를 받습니다.
+
+업그레이드 전에 중요한 로컬 mock 데이터가 있다면 `backend/data/jcloud_agent.db`를 복사해 두는 것이 좋습니다. migration이 불가능한 손상된 개발용 DB라면 백엔드를 중지한 뒤 해당 DB 파일을 삭제하여 깨끗한 mock DB를 다시 만들 수 있습니다. Render 무료 파일 시스템은 임시이므로 재배포나 재시작 때 SQLite 데이터가 초기화될 수 있습니다.
 
 ## 테스트
 
@@ -162,6 +169,7 @@ cd backend
 
 ```powershell
 cd frontend
+npm.cmd test
 npm.cmd run build
 ```
 
@@ -180,6 +188,6 @@ npm.cmd run build
 ## 데이터
 
 - 기본 SQLite 경로: `backend/data/jcloud_agent.db`
-- 기본 가상 머신: `web-demo`, `test-01`
+- session별 기본 가상 머신: `web-demo`, `test-01`
 - 백엔드는 대화 내용이나 API 키를 SQLite에 저장하지 않습니다.
 - `.env`는 `.gitignore`에 포함되어 있으므로 커밋하지 않습니다.

@@ -103,11 +103,19 @@ class MockLLMClient(LLMClient):
             else:
                 requires_gpu = False
             name_match = re.search(r"(?:ten|name)\s+([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})", analysis_text)
+            version_match = re.search(r"\b(22\.04|24\.04)\b", analysis_text)
+            version = version_match.group(1) if version_match else None
+            default_message = (
+                " Bạn không nêu phiên bản Ubuntu nên tôi mặc định chọn Ubuntu 24.04."
+                if "ubuntu" in analysis_text and version is None
+                else ""
+            )
             return self._action(
                 "plan_create_instance",
-                "Tôi sẽ kiểm tra cấu hình phù hợp.",
+                f"Tôi sẽ kiểm tra cấu hình phù hợp.{default_message}",
                 ActionParameters(
                     operating_system="ubuntu" if "ubuntu" in analysis_text else None,
+                    operating_system_version=version,
                     vcpus=int(cpu_match.group(1)),
                     ram_gb=int(ram_match.group(1)),
                     requires_gpu=requires_gpu,
@@ -203,7 +211,9 @@ You have no tools and must never claim to execute an action. Allowed actions are
 get_quota, list_images, list_flavors, plan_create_instance, start_instance, stop_instance, and
 reboot_instance. Refuse delete, shell commands, controller/compute changes, shared-network changes,
 and opening all firewall access. Ask a clarification instead of guessing missing CPU, RAM, OS, GPU,
-or target instance details. Never output credentials, tokens, passwords, or private keys. Set
+or target instance details. Extract Ubuntu 22.04 or 24.04 into operating_system_version. If the user
+only says Ubuntu, leave operating_system_version null and explicitly say that Ubuntu 24.04 will be
+selected by default. Never output credentials, tokens, passwords, or private keys. Set
 requires_confirmation=false; the backend alone decides confirmation policy and performs verified work.
 Reply to users in Vietnamese unless their message uses another language."""
 

@@ -35,6 +35,7 @@ class ActionParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operating_system: str | None = Field(default=None, max_length=80)
+    operating_system_version: Literal["22.04", "24.04"] | None = None
     vcpus: int | None = Field(default=None, ge=1, le=128)
     ram_gb: int | None = Field(default=None, ge=1, le=1024)
     requires_gpu: bool | None = None
@@ -85,3 +86,8 @@ class ChatResponse(BaseModel):
     message: str
     operation: Operation | None = None
     data: Any | None = None
+
+
+class SandboxResetResponse(BaseModel):
+    status: Literal["reset"]
+    instances: list[dict[str, Any]]
