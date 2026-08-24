@@ -124,6 +124,74 @@ def _message(key: str, language: str) -> str:
     return MESSAGES[key][language]
 
 
+def _is_recommendation_request(text: str) -> bool:
+    recommendation_terms = (
+        "추천",
+        "적합",
+        "어떤 vm",
+        "어떤 가상 머신",
+        "recommend",
+        "suitable",
+        "đề xuất",
+        "gợi ý",
+        "phù hợp",
+    )
+    infrastructure_terms = (
+        "vm",
+        "가상 머신",
+        "서버",
+        "구성",
+        "사양",
+        "자원",
+        "클라우드",
+        "instance",
+        "server",
+        "configuration",
+        "resource",
+        "máy ảo",
+        "cấu hình",
+        "tài nguyên",
+    )
+    return _has_any(text, recommendation_terms) and _has_any(text, infrastructure_terms)
+
+
+def _recommend_configuration(cloud_context: dict[str, Any], language: str) -> str:
+    quota = cloud_context.get("quota", {})
+    available_vcpus = quota.get("available_vcpus", "?")
+    available_ram = quota.get("available_ram_gb", "?")
+    flavors = cloud_context.get("flavors", [])
+    flavor_text = ", ".join(
+        f"{item.get('name', '?')} ({item.get('vcpus', '?')} vCPU, {item.get('ram_gb', '?')} GB RAM)"
+        for item in flavors[:5]
+    ) or "N/A"
+    versions = sorted(
+        {
+            str(item.get("version"))
+            for item in cloud_context.get("images", [])
+            if item.get("operating_system", "").lower() == "ubuntu" and item.get("version")
+        }
+    )
+    image_text = "/".join(versions) or "N/A"
+    messages = {
+        "ko": (
+            f"현재 사용 가능한 자원은 {available_vcpus} vCPU와 RAM {available_ram} GB입니다. "
+            f"선택 가능한 사양은 {flavor_text}입니다. 일반적인 용도에는 medium 구성을 추천하며, "
+            f"Ubuntu {image_text}를 사용할 수 있습니다. 구체적인 용도를 알려 주시면 더 정확히 추천해 드리겠습니다."
+        ),
+        "vi": (
+            f"Hiện còn {available_vcpus} vCPU và {available_ram} GB RAM. Các cấu hình có thể chọn: "
+            f"{flavor_text}. Tôi đề xuất cấu hình medium cho nhu cầu thông thường; có thể dùng Ubuntu "
+            f"{image_text}. Hãy cho biết mục đích sử dụng để tôi đề xuất chính xác hơn."
+        ),
+        "en": (
+            f"Available capacity is {available_vcpus} vCPU and {available_ram} GB RAM. Available sizes: "
+            f"{flavor_text}. I recommend medium for a typical workload; Ubuntu {image_text} is available. "
+            "Tell me the workload for a more precise recommendation."
+        ),
+    }
+    return messages[language]
+
+
 def _extract_vcpus(text: str) -> int | None:
     for pattern in (
         r"(\d+)\s*(?:v?cpu)(?:\s*개)?",
@@ -293,6 +361,11 @@ class MockLLMClient(LLMClient):
             return LLMDecision(
                 decision_type="answer",
                 message=_message("unsupported", language),
+            )
+        if _is_recommendation_request(text):
+            return LLMDecision(
+                decision_type="answer",
+                message=_recommend_configuration(cloud_context, language),
             )
         if _has_any(text, ("이미지 목록", "이미지 보여", "list image", "show image", "danh sách image", "các image")):
             return self._action("list_images", _message("list_images", language))

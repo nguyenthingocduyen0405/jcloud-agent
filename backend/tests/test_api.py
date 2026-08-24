@@ -740,6 +740,35 @@ def test_fast_path_uses_remote_provider_for_unknown_intents():
     assert fallback.calls == 2
 
 
+def test_fast_path_answers_korean_vm_recommendations_locally():
+    fallback = CountingLLMClient()
+    llm = FastPathLLMClient(fallback)
+    cloud_context = {
+        "quota": {"available_vcpus": 13, "available_ram_gb": 58},
+        "flavors": [
+            {"name": "small", "vcpus": 1, "ram_gb": 2},
+            {"name": "medium", "vcpus": 2, "ram_gb": 4},
+            {"name": "large", "vcpus": 4, "ram_gb": 16},
+        ],
+        "images": [
+            {"operating_system": "ubuntu", "version": "22.04"},
+            {"operating_system": "ubuntu", "version": "24.04"},
+        ],
+    }
+
+    for message in (
+        "현재 사용 가능한 자원을 확인하고 적절한 가상 머신 구성을 추천해 줘",
+        "지금 만들 수 있는 가상 머신 사양을 추천해 줘",
+        "내 클라우드 상태를 분석해서 어떤 VM이 적합한지 알려줘",
+    ):
+        decision = llm.parse_message(message, [], cloud_context)
+        assert decision.decision_type == "answer"
+        assert "13 vCPU" in decision.message
+        assert "medium" in decision.message
+
+    assert fallback.calls == 0
+
+
 def test_openrouter_uses_json_mode_without_restricting_free_provider_routing():
     decision = LLMDecision(decision_type="answer", message="안전한 답변")
     completions = FakeChatCompletions([decision.model_dump_json()])
