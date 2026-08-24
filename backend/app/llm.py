@@ -49,9 +49,15 @@ CREATE_PHRASES = (
     "máy ảo mới",
 )
 
+TARGET_ACTIONS = frozenset({"start_instance", "stop_instance", "reboot_instance"})
+
 
 def _has_any(text: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in text for phrase in phrases)
+
+
+def is_create_intent(text: str) -> bool:
+    return _has_any(_plain(text), CREATE_PHRASES)
 
 
 def detect_language(
@@ -227,6 +233,11 @@ def _missing_create_fields(assistant_text: str) -> frozenset[str]:
     return frozenset(fields)
 
 
+def requested_create_fields(text: str) -> frozenset[str]:
+    """Return create fields explicitly requested by a clarification message."""
+    return _missing_create_fields(_plain(text))
+
+
 def _pending_create_context(
     conversation_context: list[dict[str, str]],
 ) -> tuple[str, frozenset[str]] | None:
@@ -335,12 +346,43 @@ class MockLLMClient(LLMClient):
             stored_pending.get("language", "ko") if isinstance(stored_pending, dict) else "ko"
         )
         language = detect_language(message, conversation_context, fallback_language)
+        if stored_pending and stored_pending.get("action") in TARGET_ACTIONS:
+            pending_action = stored_pending["action"]
+            bare_name = re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}", text)
+            if bare_name:
+                replies = {
+                    "start_instance": {
+                        "ko": "머신 시작 계획을 준비하겠습니다.",
+                        "vi": "Tôi sẽ chuẩn bị kế hoạch khởi động máy.",
+                        "en": "I will prepare a machine start plan.",
+                    },
+                    "stop_instance": {
+                        "ko": "머신 중지 계획을 준비하겠습니다.",
+                        "vi": "Tôi sẽ chuẩn bị kế hoạch dừng máy.",
+                        "en": "I will prepare a machine stop plan.",
+                    },
+                    "reboot_instance": {
+                        "ko": "머신 재부팅 계획을 준비하겠습니다.",
+                        "vi": "Tôi sẽ chuẩn bị kế hoạch khởi động lại máy.",
+                        "en": "I will prepare a machine reboot plan.",
+                    },
+                }
+                return self._action(
+                    pending_action,
+                    replies[pending_action][language],
+                    ActionParameters(name=bare_name.group()),
+                )
         analysis_text = text
         pending_create = None
         if not _has_any(text, CREATE_PHRASES):
             if stored_pending and stored_pending.get("action") == "plan_create_instance":
                 stored_parameters = stored_pending.get("parameters", {})
-                missing_fields = _required_create_fields(stored_parameters)
+                stored_awaiting = frozenset(
+                    field
+                    for field in stored_pending.get("awaiting_fields", [])
+                    if field in {"operating_system", "vcpus", "ram_gb", "name"}
+                )
+                missing_fields = _required_create_fields(stored_parameters) | stored_awaiting
                 if conversation_context and conversation_context[-1].get("role") == "assistant":
                     missing_fields = missing_fields | _missing_create_fields(
                         _plain(conversation_context[-1].get("content", ""))
@@ -489,7 +531,11 @@ class MockLLMClient(LLMClient):
             if _has_any(text, phrases):
                 name = _instance_name(message)
                 if not name:
-                    return LLMDecision(decision_type="clarification", message=_message("target", language))
+                    return LLMDecision(
+                        decision_type="clarification",
+                        pending_action=action,
+                        message=_message("target", language),
+                    )
                 return self._action(action, reply[language], ActionParameters(name=name))
         return LLMDecision(
             decision_type="answer",
@@ -602,7 +648,7 @@ class OpenAILLMClient(LLMClient):
             response = self.client.responses.create(
                 **request_options,
             )
-            return LLMDecision.model_validate_json(response.output_text)
+            return _parse_llm_decision(response.output_text)
         except Exception as exc:
             raise LLMClientError("The LLM provider did not return a valid decision") from exc
 
@@ -687,7 +733,7 @@ class OpenRouterLLMClient(LLMClient):
                 content = response.choices[0].message.content
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("OpenRouter returned no JSON content")
-                return _parse_openrouter_decision(content)
+                return _parse_llm_decision(content)
             except Exception as exc:
                 last_error = exc
                 logger.warning(
@@ -700,7 +746,171 @@ class OpenRouterLLMClient(LLMClient):
         raise LLMClientError("OpenRouter did not return a valid decision") from last_error
 
 
-def _parse_openrouter_decision(content: str) -> LLMDecision:
+ACTION_ALIASES = {
+    "list_instances": "list_instances",
+    "list_instance": "list_instances",
+    "list_vms": "list_instances",
+    "show_instances": "list_instances",
+    "get_quota": "get_quota",
+    "check_quota": "get_quota",
+    "quota": "get_quota",
+    "list_images": "list_images",
+    "show_images": "list_images",
+    "images": "list_images",
+    "list_flavors": "list_flavors",
+    "show_flavors": "list_flavors",
+    "list_sizes": "list_flavors",
+    "flavors": "list_flavors",
+    "plan_create_instance": "plan_create_instance",
+    "create_instance": "plan_create_instance",
+    "create_vm": "plan_create_instance",
+    "new_instance": "plan_create_instance",
+    "provision_instance": "plan_create_instance",
+    "start_instance": "start_instance",
+    "start_vm": "start_instance",
+    "power_on_instance": "start_instance",
+    "stop_instance": "stop_instance",
+    "stop_vm": "stop_instance",
+    "power_off_instance": "stop_instance",
+    "reboot_instance": "reboot_instance",
+    "restart_instance": "reboot_instance",
+    "reboot_vm": "reboot_instance",
+}
+
+PARAMETER_ALIASES = {
+    "operating_system": ("operating_system", "operating_system_name", "os"),
+    "operating_system_version": ("operating_system_version", "os_version", "version"),
+    "vcpus": ("vcpus", "vcpu", "cpus", "cpu"),
+    "ram_gb": ("ram_gb", "ram", "memory_gb", "memory"),
+    "requires_gpu": ("requires_gpu", "gpu", "needs_gpu"),
+    "name": ("name", "instance_name", "vm_name"),
+}
+
+
+def _first_value(values: dict[str, Any], names: tuple[str, ...]) -> Any:
+    return next((values[name] for name in names if name in values), None)
+
+
+def _integer_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    match = re.search(r"\d+", str(value))
+    return int(match.group()) if match else value
+
+
+def _boolean_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    normalized = _plain(str(value))
+    if normalized in {"true", "yes", "1", "필요", "있음", "có"}:
+        return True
+    if normalized in {"false", "no", "0", "불필요", "없음", "không"}:
+        return False
+    return value
+
+
+def _normalize_llm_decision(value: Any) -> LLMDecision:
+    """Accept harmless provider variations while preserving the action allowlist."""
+    if not isinstance(value, dict):
+        raise ValueError("LLM decision must be a JSON object")
+
+    raw_action = value.get("action") or value.get("intent")
+    if raw_action is None and str(value.get("decision_type", "")).lower() in ACTION_ALIASES:
+        raw_action = value.get("decision_type")
+    action = ACTION_ALIASES.get(_plain(str(raw_action))) if raw_action is not None else None
+    if raw_action is not None and action is None:
+        raise ValueError("LLM returned an unsupported action")
+
+    raw_parameters = value.get("parameters") or value.get("params") or value.get("arguments") or {}
+    if not isinstance(raw_parameters, dict):
+        raw_parameters = {}
+    combined_parameters = {**value, **raw_parameters}
+    parameters: dict[str, Any] = {}
+    for canonical, aliases in PARAMETER_ALIASES.items():
+        parameter_value = _first_value(combined_parameters, aliases)
+        if parameter_value is not None:
+            parameters[canonical] = parameter_value
+    for numeric_field in ("vcpus", "ram_gb"):
+        if numeric_field in parameters:
+            parameters[numeric_field] = _integer_value(parameters[numeric_field])
+    if "requires_gpu" in parameters:
+        parameters["requires_gpu"] = _boolean_value(parameters["requires_gpu"])
+    if "operating_system" in parameters and isinstance(parameters["operating_system"], str):
+        parameters["operating_system"] = parameters["operating_system"].strip().lower()
+    if "operating_system_version" in parameters:
+        version_match = re.search(r"\b(22\.04|24\.04)\b", str(parameters["operating_system_version"]))
+        parameters["operating_system_version"] = (
+            version_match.group(1) if version_match else parameters["operating_system_version"]
+        )
+    if "name" in parameters and isinstance(parameters["name"], str):
+        parameters["name"] = parameters["name"].strip()
+
+    raw_type = _plain(str(value.get("decision_type") or value.get("type") or ""))
+    type_aliases = {
+        "action": "action",
+        "intent": "action",
+        "clarification": "clarification",
+        "question": "clarification",
+        "ask": "clarification",
+        "answer": "answer",
+        "response": "answer",
+        "reply": "answer",
+    }
+    decision_type = type_aliases.get(raw_type)
+    if decision_type is None:
+        decision_type = "action" if action else "answer"
+
+    raw_pending = value.get("pending_action") or value.get("pending_intent")
+    pending_action = (
+        ACTION_ALIASES.get(_plain(str(raw_pending))) if raw_pending is not None else None
+    )
+    if pending_action not in {None, "plan_create_instance", *TARGET_ACTIONS}:
+        pending_action = None
+
+    if decision_type == "clarification":
+        if action == "plan_create_instance":
+            pending_action = "plan_create_instance"
+        action = None
+    elif decision_type == "answer":
+        action = None
+        pending_action = None
+    else:
+        pending_action = None
+
+    if action == "plan_create_instance" and any(
+        parameters.get(field) is None for field in ("operating_system", "vcpus", "ram_gb")
+    ):
+        decision_type = "clarification"
+        action = None
+        pending_action = "plan_create_instance"
+    elif action in TARGET_ACTIONS and parameters.get("name") is None:
+        decision_type = "clarification"
+        pending_action = action
+        action = None
+
+    message = next(
+        (
+            str(value[key]).strip()
+            for key in ("message", "reply", "response", "text")
+            if value.get(key) is not None and str(value[key]).strip()
+        ),
+        "요청 내용을 확인했습니다.",
+    )[:500]
+    return LLMDecision.model_validate(
+        {
+            "decision_type": decision_type,
+            "action": action,
+            "pending_action": pending_action,
+            "parameters": parameters,
+            "message": message,
+            "requires_confirmation": False,
+        }
+    )
+
+
+def _parse_llm_decision(content: str) -> LLMDecision:
     """Validate JSON even when a model wraps it in Markdown or brief prose."""
     stripped = content.strip()
     candidates = [stripped]
@@ -719,8 +929,8 @@ def _parse_openrouter_decision(content: str) -> LLMDecision:
     last_error: Exception | None = None
     for candidate in candidates:
         try:
-            return LLMDecision.model_validate_json(candidate)
-        except (ValueError, TypeError) as exc:
+            return _normalize_llm_decision(json.loads(candidate))
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
             last_error = exc
     raise ValueError("OpenRouter response did not match the decision schema") from last_error
 
@@ -740,7 +950,7 @@ leave operating_system_version null and explicitly say Ubuntu 24.04 will be sele
 
 Use conversation_context only when the immediately preceding assistant message asked for missing
 details. If cloud_context.pending_request exists, treat its parameters as collected state, merge new
-details into it, and set pending_action=plan_create_instance on clarifications. Do not revive an older
+details into it, and set pending_action to the intended allowed action on clarifications. Do not revive an older
 request after the user has changed topics. Reply in the language of the current user message, including
 Vietnamese, Korean, or English. Refuse deletion, shell commands,
 controller or compute changes, shared-network changes, and opening all firewall access. Never output

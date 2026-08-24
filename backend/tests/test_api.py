@@ -108,6 +108,21 @@ def test_create_requires_confirmation_and_uses_verified_metadata(tmp_path):
         assert "ubuntu-demo" in names
 
 
+def test_create_selects_nearest_flavor_and_still_requires_confirmation(tmp_path):
+    with client(tmp_path) as api:
+        response = api.post(
+            "/api/chat",
+            json={"message": "Ubuntu 24.04, CPU 3개, RAM 8 GB 머신을 생성해 줘."},
+        ).json()
+
+        operation = response["operation"]
+        assert operation["status"] == "waiting_for_confirmation"
+        assert operation["payload"]["flavor"] == "large"
+        assert operation["payload"]["vcpus"] == 4
+        assert operation["payload"]["ram_gb"] == 16
+        assert "가장 가까운 large" in response["message"]
+
+
 def test_clarification_does_not_create_operation(tmp_path):
     with client(tmp_path) as api:
         response = api.post("/api/chat", json={"message": "강력한 머신을 만들어 줘."}).json()
@@ -275,6 +290,18 @@ def test_pending_create_state_is_isolated_by_session(tmp_path):
         assert same_session["operation"]["payload"]["vcpus"] == 4
 
 
+def test_short_machine_name_continues_a_pending_stop_request(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post("/api/chat", json={"message": "머신을 중지해 줘"}).json()
+        assert first["operation"] is None
+        assert "어떤 머신" in first["message"]
+
+        second = api.post("/api/chat", json={"message": "test-01"}).json()
+        assert second["operation"]["status"] == "waiting_for_confirmation"
+        assert second["operation"]["action"] == "stop_instance"
+        assert second["operation"]["payload"]["name"] == "test-01"
+
+
 def test_mock_llm_only_continues_an_immediately_pending_create():
     llm = MockLLMClient()
     stale_context = [
@@ -371,7 +398,27 @@ class FailingLLMClient(LLMClient):
         conversation_context: list[dict[str, str]],
         cloud_context: dict[str, Any],
     ) -> Any:
-        raise RuntimeError("provider unavailable")
+        raise LLMClientError("provider unavailable")
+
+
+class AskForNameLLMClient(LLMClient):
+    def parse_message(
+        self,
+        message: str,
+        conversation_context: list[dict[str, str]],
+        cloud_context: dict[str, Any],
+    ) -> LLMDecision:
+        return LLMDecision(
+            decision_type="clarification",
+            parameters={
+                "operating_system": "ubuntu",
+                "operating_system_version": "24.04",
+                "vcpus": 4,
+                "ram_gb": 16,
+                "requires_gpu": False,
+            },
+            message="생성할 인스턴스의 이름을 알려주세요.",
+        )
 
 
 def test_invalid_structured_output_is_not_executed(tmp_path):
@@ -379,7 +426,7 @@ def test_invalid_structured_output_is_not_executed(tmp_path):
         before = api.get("/api/instances").json()
         response = api.post("/api/chat", json={"message": "hello"}).json()
         assert response["operation"] is None
-        assert "어떠한 작업도 실행되지 않았습니다" in response["message"]
+        assert "안전한 작업 정보를 추출하지 못했습니다" in response["message"]
         assert api.get("/api/instances").json() == before
 
 
@@ -388,8 +435,23 @@ def test_llm_failure_is_safe_and_creates_no_operation(tmp_path):
         before = api.get("/api/instances").json()
         response = api.post("/api/chat", json={"message": "test-01 머신을 중지해 줘"}).json()
         assert response["operation"] is None
-        assert "어떠한 작업도 실행되지 않았습니다" in response["message"]
+        assert "AI 모델 응답을 처리하지 못했습니다" in response["message"]
         assert api.get("/api/instances").json() == before
+
+
+def test_model_clarification_persists_the_field_it_is_waiting_for(tmp_path):
+    llm = FastPathLLMClient(AskForNameLLMClient())
+    with client(tmp_path, llm) as api:
+        first = api.post(
+            "/api/chat",
+            json={"message": "Ubuntu 24.04, CPU 4개, RAM 16 GB로 프로비저닝해 줘."},
+        ).json()
+        assert first["operation"] is None
+        assert "이름" in first["message"]
+
+        second = api.post("/api/chat", json={"message": "test"}).json()
+        assert second["operation"]["status"] == "waiting_for_confirmation"
+        assert second["operation"]["payload"]["name"] == "test"
 
 
 def test_sensitive_values_are_not_sent_to_llm(tmp_path):
@@ -596,6 +658,42 @@ def test_legacy_instance_schema_is_migrated_without_data_loss(tmp_path):
         },
     )
     assert repository.get_instance("another-session", "legacy-name") is not None
+
+
+def test_pending_request_schema_adds_awaiting_fields_without_data_loss(tmp_path):
+    database_path = tmp_path / "legacy-pending.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE pending_requests (
+                session_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT 'ko',
+                parameters TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, user_id, project_id)
+            );
+            INSERT INTO pending_requests VALUES
+                ('legacy-session', 'legacy-user', 'legacy-project',
+                 'plan_create_instance', 'ko', '{"operating_system":"ubuntu"}',
+                 '2026-01-01', '2026-01-01');
+            """
+        )
+
+    repository = Repository(str(database_path))
+    repository.initialize()
+    pending = repository.get_pending_request(
+        session_id="legacy-session",
+        user_id="legacy-user",
+        project_id="legacy-project",
+    )
+
+    assert pending is not None
+    assert pending["parameters"]["operating_system"] == "ubuntu"
+    assert pending["awaiting_fields"] == []
 
 
 class CountingMockCloudClient(MockCloudClient):
@@ -864,6 +962,87 @@ def test_openrouter_accepts_json_wrapped_in_markdown():
     )
 
     assert llm.parse_message("설명해 줘", [], {}).message == "정상 응답"
+
+
+def test_openrouter_normalizes_safe_aliases_and_ignores_extra_fields():
+    output = json.dumps(
+        {
+            "type": "action",
+            "intent": "create_vm",
+            "params": {
+                "os": "Ubuntu",
+                "version": "Ubuntu 24.04 LTS",
+                "cpu": "4 vCPU",
+                "ram": "16 GB",
+                "gpu": "no",
+                "instance_name": "alias-test",
+                "provider_hint": "ignored",
+            },
+            "reply": "구성을 확인했습니다.",
+            "confidence": 0.92,
+        }
+    )
+    completions = FakeChatCompletions([output])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        client=FakeOpenRouterClient(completions),
+    )
+
+    decision = llm.parse_message("만들어 줘", [], {})
+
+    assert decision.action == "plan_create_instance"
+    assert decision.parameters.operating_system == "ubuntu"
+    assert decision.parameters.operating_system_version == "24.04"
+    assert decision.parameters.vcpus == 4
+    assert decision.parameters.ram_gb == 16
+    assert decision.parameters.requires_gpu is False
+    assert decision.parameters.name == "alias-test"
+
+
+def test_openrouter_turns_incomplete_create_alias_into_clarification():
+    output = json.dumps(
+        {
+            "intent": "create_instance",
+            "arguments": {"os": "Ubuntu", "ram": "4 GB"},
+            "text": "vCPU 수를 알려 주세요.",
+        }
+    )
+    completions = FakeChatCompletions([output])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        client=FakeOpenRouterClient(completions),
+    )
+
+    decision = llm.parse_message("VM 생성", [], {})
+
+    assert decision.decision_type == "clarification"
+    assert decision.pending_action == "plan_create_instance"
+    assert decision.parameters.operating_system == "ubuntu"
+    assert decision.parameters.ram_gb == 4
+
+
+def test_openrouter_turns_missing_target_alias_into_clarification():
+    output = json.dumps(
+        {
+            "type": "action",
+            "intent": "restart_instance",
+            "reply": "어떤 머신을 재부팅할까요?",
+        }
+    )
+    completions = FakeChatCompletions([output])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        client=FakeOpenRouterClient(completions),
+    )
+
+    decision = llm.parse_message("재부팅해 줘", [], {})
+
+    assert decision.decision_type == "clarification"
+    assert decision.pending_action == "reboot_instance"
+    assert decision.action is None
 
 
 def test_openai_timeout_and_invalid_output_are_safe(tmp_path):

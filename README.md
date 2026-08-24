@@ -152,6 +152,16 @@ parse_message(message, conversation_context, cloud_context)
 
 작업 허용 목록은 `list_instances`, `get_quota`, `list_images`, `list_flavors`, `plan_create_instance`, `start_instance`, `stop_instance`, `reboot_instance`입니다.
 
+provider 응답은 이 허용 목록 안에서 안전하게 정규화됩니다. 예를 들어 `create_vm`은
+`plan_create_instance`로, `cpu`와 `ram`은 각각 `vcpus`와 `ram_gb`로 변환하고 알 수 없는 부가
+필드는 무시합니다. 허용 목록 밖의 action은 정규화하지 않고 거부합니다. 생성·시작·중지·재부팅
+과정에서 추가 정보가 필요하면 현재 기다리는 필드를 세션에 저장하므로 `test`, `4개`, `16GB` 같은
+짧은 후속 답변도 직전 질문의 문맥으로 해석합니다.
+
+요청한 CPU/RAM과 정확히 일치하는 flavor가 없으면 가장 가까운 허용 flavor를 계획에 넣고 차이를
+사용자에게 표시합니다. 이 경우에도 operation은 `waiting_for_confirmation` 상태로 생성되며 사용자가
+확인하기 전에는 실행되지 않습니다.
+
 인스턴스 삭제, 셸 명령 실행, controller/compute node 변경, 공유 네트워크 변경, 전체 방화벽 개방은 지원하지 않습니다.
 
 OpenAI provider는 strict Structured Outputs를 사용하며 요청마다 기본 15초 timeout과 500 output-token 제한을 적용합니다. 현재 실제로 선택된 provider는 `/api/health`의 `llm_provider`에서 확인할 수 있습니다. 다음 환경 변수로 값을 조정할 수 있습니다.

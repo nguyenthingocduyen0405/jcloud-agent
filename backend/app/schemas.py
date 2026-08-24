@@ -47,7 +47,9 @@ class LLMDecision(BaseModel):
 
     decision_type: Literal["action", "clarification", "answer"]
     action: AllowedAction | None = None
-    pending_action: Literal["plan_create_instance"] | None = None
+    pending_action: Literal[
+        "plan_create_instance", "start_instance", "stop_instance", "reboot_instance"
+    ] | None = None
     parameters: ActionParameters = Field(default_factory=ActionParameters)
     message: str = Field(min_length=1, max_length=500)
     requires_confirmation: bool = False

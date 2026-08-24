@@ -13,7 +13,14 @@ from pydantic import ValidationError
 
 from .cloud import CloudClient, MockCloudClient
 from .database import Repository, utc_now
-from .llm import LLMClient, LLMClientError, create_llm_client, detect_language
+from .llm import (
+    LLMClient,
+    LLMClientError,
+    create_llm_client,
+    detect_language,
+    is_create_intent,
+    requested_create_fields,
+)
 from .policy import ALLOWED_ACTIONS, MUTATING_ACTIONS, contains_sensitive_value, is_prohibited_request
 from .schemas import (
     ActionParameters,
@@ -125,35 +132,89 @@ def create_app(
             ],
             "pending_request": pending_request,
         }
+        conversation = [item.model_dump() for item in request.conversation_context]
+        language = detect_language(
+            request.message,
+            conversation,
+            pending_request.get("language", "ko") if pending_request else "ko",
+        )
         try:
             raw_decision = llm.parse_message(
                 request.message,
-                [item.model_dump() for item in request.conversation_context],
+                conversation,
                 cloud_context,
             )
             decision = LLMDecision.model_validate(raw_decision)
-        except (LLMClientError, ValidationError, ValueError, TypeError, RuntimeError):
+        except LLMClientError:
             return ChatResponse(
-                message="현재 요청을 안전하게 해석할 수 없습니다. 어떠한 작업도 실행되지 않았습니다."
+                message={
+                    "ko": "AI 모델 응답을 처리하지 못했습니다. 잠시 후 다시 시도하거나 요청을 더 구체적으로 작성해 주세요.",
+                    "vi": "Không xử lý được phản hồi từ model AI. Hãy thử lại hoặc mô tả yêu cầu cụ thể hơn.",
+                    "en": "The AI model response could not be processed. Try again or make the request more specific.",
+                }[language]
+            )
+        except (ValidationError, ValueError, TypeError, RuntimeError):
+            return ChatResponse(
+                message={
+                    "ko": "요청에서 안전한 작업 정보를 추출하지 못했습니다. 운영체제, vCPU, RAM 또는 머신 이름을 구체적으로 알려 주세요.",
+                    "vi": "Không trích xuất được thông tin thao tác an toàn. Hãy nêu rõ hệ điều hành, vCPU, RAM hoặc tên máy.",
+                    "en": "Safe operation details could not be extracted. Specify the OS, vCPU, RAM, or machine name.",
+                }[language]
             )
 
         if decision.decision_type == "clarification":
-            if decision.pending_action == "plan_create_instance":
+            explicitly_requested = requested_create_fields(decision.message)
+            pending_action = decision.pending_action
+            if pending_action is None and pending_request:
+                pending_action = pending_request.get("action")
+            is_create_clarification = (
+                pending_action == "plan_create_instance"
+                or (pending_request and pending_request.get("action") == "plan_create_instance")
+                or (
+                    bool(explicitly_requested)
+                    and (
+                        is_create_intent(request.message)
+                        or any(
+                            value is not None
+                            for value in (
+                                decision.parameters.operating_system,
+                                decision.parameters.vcpus,
+                                decision.parameters.ram_gb,
+                            )
+                        )
+                    )
+                )
+            )
+            if is_create_clarification:
+                pending_action = "plan_create_instance"
+            if pending_action in MUTATING_ACTIONS:
                 parameters = merge_action_parameters(
                     pending_request["parameters"] if pending_request else None,
                     decision.parameters,
                 )
+                if pending_action == "plan_create_instance":
+                    required_fields = {
+                        field
+                        for field, value in (
+                            ("operating_system", parameters.operating_system),
+                            ("vcpus", parameters.vcpus),
+                            ("ram_gb", parameters.ram_gb),
+                        )
+                        if value is None
+                    }
+                else:
+                    required_fields = {"name"} if parameters.name is None else set()
+                awaiting_fields = sorted(required_fields | set(explicitly_requested))
                 repository.upsert_pending_request(
                     session_id=identity.session_id,
                     user_id=identity.user_id,
                     project_id=identity.project_id,
-                    action="plan_create_instance",
+                    action=pending_action,
                     language=detect_language(
-                        request.message,
-                        [item.model_dump() for item in request.conversation_context],
-                        pending_request.get("language", "ko") if pending_request else "ko",
+                        request.message, conversation, language
                     ),
                     parameters=parameters.model_dump(),
+                    awaiting_fields=awaiting_fields,
                 )
             elif pending_request:
                 repository.clear_pending_request(
@@ -206,8 +267,22 @@ def create_app(
                 )
                 payload = resolve_instance_plan(create_parameters, cloud)
                 cloud.plan_create_instance(identity.session_id, payload)
+                if (
+                    payload["vcpus"] != create_parameters.vcpus
+                    or payload["ram_gb"] != create_parameters.ram_gb
+                ):
+                    response_message += flavor_adjustment_message(
+                        language,
+                        requested_vcpus=create_parameters.vcpus,
+                        requested_ram_gb=create_parameters.ram_gb,
+                        payload=payload,
+                    )
                 if uses_default_ubuntu and "24.04" not in response_message:
-                    response_message += " Ubuntu 버전을 지정하지 않아 Ubuntu 24.04를 기본으로 선택합니다."
+                    response_message += {
+                        "ko": " Ubuntu 버전을 지정하지 않아 Ubuntu 24.04를 기본으로 선택합니다.",
+                        "vi": " Bạn chưa chỉ định phiên bản Ubuntu nên hệ thống chọn Ubuntu 24.04 mặc định.",
+                        "en": " No Ubuntu version was specified, so Ubuntu 24.04 was selected by default.",
+                    }[language]
                 summary = (
                     f"{payload['name']} 생성: {payload['image']}, "
                     f"{payload['vcpus']} vCPU, RAM {payload['ram_gb']} GB"
@@ -354,6 +429,32 @@ def merge_action_parameters(
     return ActionParameters.model_validate(merged)
 
 
+def flavor_adjustment_message(
+    language: str,
+    *,
+    requested_vcpus: int,
+    requested_ram_gb: int,
+    payload: dict[str, Any],
+) -> str:
+    messages = {
+        "ko": (
+            f" 요청한 {requested_vcpus} vCPU/RAM {requested_ram_gb} GB와 정확히 일치하는 flavor가 없어 "
+            f"가장 가까운 {payload['flavor']}({payload['vcpus']} vCPU/RAM {payload['ram_gb']} GB)를 선택했습니다. 확인 후 실행해 주세요."
+        ),
+        "vi": (
+            f" Không có flavor khớp chính xác {requested_vcpus} vCPU/{requested_ram_gb} GB RAM; "
+            f"đã chọn cấu hình gần nhất {payload['flavor']} ({payload['vcpus']} vCPU/{payload['ram_gb']} GB RAM). "
+            "Hãy kiểm tra trước khi xác nhận."
+        ),
+        "en": (
+            f" No flavor exactly matches {requested_vcpus} vCPU/{requested_ram_gb} GB RAM; "
+            f"the closest option {payload['flavor']} ({payload['vcpus']} vCPU/{payload['ram_gb']} GB RAM) was selected. "
+            "Review it before confirming."
+        ),
+    }
+    return messages[language]
+
+
 def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> dict[str, Any]:
     if not parameters.operating_system or parameters.vcpus is None or parameters.ram_gb is None:
         raise ValueError("운영체제, vCPU 수와 RAM 용량을 알려 주세요.")
@@ -375,16 +476,29 @@ def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> d
     )
     if not image:
         raise ValueError("요청한 운영체제에 허용된 이미지를 찾을 수 없습니다.")
+    flavors = cloud.list_flavors()
     flavor = next(
         (
             item
-            for item in cloud.list_flavors()
+            for item in flavors
             if item["vcpus"] == parameters.vcpus and item["ram_gb"] == parameters.ram_gb
         ),
         None,
     )
     if not flavor:
-        raise ValueError("요청한 CPU와 RAM에 정확히 일치하는 허용된 flavor가 없습니다.")
+        if not flavors:
+            raise ValueError("사용 가능한 flavor가 없습니다.")
+        flavor = min(
+            flavors,
+            key=lambda item: (
+                0
+                if item["vcpus"] >= parameters.vcpus and item["ram_gb"] >= parameters.ram_gb
+                else 1,
+                abs(item["vcpus"] - parameters.vcpus) / parameters.vcpus
+                + abs(item["ram_gb"] - parameters.ram_gb) / parameters.ram_gb,
+                item["vcpus"] + item["ram_gb"],
+            ),
+        )
 
     return {
         "name": parameters.name or f"{os_name}-demo",
@@ -392,8 +506,8 @@ def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> d
         "image": image["name"],
         "flavor_id": flavor["id"],
         "flavor": flavor["name"],
-        "vcpus": parameters.vcpus,
-        "ram_gb": parameters.ram_gb,
+        "vcpus": flavor["vcpus"],
+        "ram_gb": flavor["ram_gb"],
         "requires_gpu": bool(parameters.requires_gpu),
     }
 

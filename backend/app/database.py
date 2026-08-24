@@ -73,6 +73,7 @@ class Repository:
                     action TEXT NOT NULL,
                     language TEXT NOT NULL DEFAULT 'ko',
                     parameters TEXT NOT NULL,
+                    awaiting_fields TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (session_id, user_id, project_id)
@@ -86,6 +87,11 @@ class Repository:
             if "language" not in pending_request_columns:
                 connection.execute(
                     "ALTER TABLE pending_requests ADD COLUMN language TEXT NOT NULL DEFAULT 'ko'"
+                )
+            if "awaiting_fields" not in pending_request_columns:
+                connection.execute(
+                    "ALTER TABLE pending_requests ADD COLUMN awaiting_fields "
+                    "TEXT NOT NULL DEFAULT '[]'"
                 )
             operation_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(operations)").fetchall()
@@ -239,7 +245,7 @@ class Repository:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, language, parameters, created_at, updated_at
+                SELECT action, language, parameters, awaiting_fields, created_at, updated_at
                 FROM pending_requests
                 WHERE session_id = ? AND user_id = ? AND project_id = ?
                 """,
@@ -249,6 +255,7 @@ class Repository:
             return None
         pending = dict(row)
         pending["parameters"] = json.loads(pending["parameters"])
+        pending["awaiting_fields"] = json.loads(pending["awaiting_fields"])
         return pending
 
     def upsert_pending_request(
@@ -260,6 +267,7 @@ class Repository:
         action: str,
         language: str,
         parameters: dict[str, Any],
+        awaiting_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with self.connect() as connection:
@@ -267,12 +275,13 @@ class Repository:
                 """
                 INSERT INTO pending_requests
                     (session_id, user_id, project_id, action, language, parameters,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     awaiting_fields, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id, user_id, project_id) DO UPDATE SET
                     action = excluded.action,
                     language = excluded.language,
                     parameters = excluded.parameters,
+                    awaiting_fields = excluded.awaiting_fields,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -282,6 +291,7 @@ class Repository:
                     action,
                     language,
                     json.dumps(parameters),
+                    json.dumps(awaiting_fields or []),
                     now,
                     now,
                 ),
@@ -290,6 +300,7 @@ class Repository:
             "action": action,
             "language": language,
             "parameters": parameters,
+            "awaiting_fields": awaiting_fields or [],
             "created_at": now,
             "updated_at": now,
         }
