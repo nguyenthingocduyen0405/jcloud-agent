@@ -519,6 +519,90 @@ class OpenAILLMClient(LLMClient):
             raise LLMClientError("The LLM provider did not return a valid decision") from exc
 
 
+class OpenRouterLLMClient(LLMClient):
+    """OpenRouter Chat Completions adapter with validated JSON output."""
+
+    provider_name = "openrouter"
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        *,
+        timeout_seconds: float = 20.0,
+        max_output_tokens: int = 500,
+        attempts: int = 2,
+        client: Any | None = None,
+    ) -> None:
+        if not model:
+            raise ValueError("OPENROUTER_MODEL is required when LLM_PROVIDER=openrouter")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter")
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.max_output_tokens = max_output_tokens
+        self.attempts = max(1, min(attempts, 3))
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+                timeout=timeout_seconds,
+                default_headers={
+                    "HTTP-Referer": "https://jcloud-agent.onrender.com",
+                    "X-OpenRouter-Title": "JCloud Agent",
+                },
+            )
+        self.client = client
+
+    def parse_message(
+        self,
+        message: str,
+        conversation_context: list[dict[str, str]],
+        cloud_context: dict[str, Any],
+    ) -> LLMDecision:
+        prompt_payload = {
+            "conversation_context": conversation_context[-10:],
+            "cloud_context": cloud_context,
+            "message": message,
+            "decision_schema": strict_llm_decision_schema(),
+        }
+        last_error: Exception | None = None
+        for attempt in range(self.attempts):
+            retry_instruction = (
+                "\nYour previous response was invalid. Return only one JSON object matching the schema."
+                if attempt
+                else ""
+            )
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": f"{SYSTEM_INSTRUCTIONS}{retry_instruction}",
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(prompt_payload, ensure_ascii=False),
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                    max_tokens=self.max_output_tokens,
+                    timeout=self.timeout_seconds,
+                    extra_body={"provider": {"require_parameters": True}},
+                )
+                content = response.choices[0].message.content
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("OpenRouter returned no JSON content")
+                return LLMDecision.model_validate_json(content)
+            except Exception as exc:
+                last_error = exc
+        raise LLMClientError("OpenRouter did not return a valid decision") from last_error
+
+
 SYSTEM_INSTRUCTIONS = """Act as the natural-language planner for a safe JCloud assistant.
 Return only a decision that matches the supplied JSON schema. You have no tools and must never claim
 that an action has already run. Allowed actions are list_instances, get_quota, list_images,
@@ -544,9 +628,19 @@ decides confirmation policy, validates metadata, and performs verified work."""
 def create_llm_client() -> LLMClient:
     provider = os.getenv("LLM_PROVIDER", "auto").strip().lower()
     api_key = os.getenv("LLM_API_KEY", "").strip()
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     model = os.getenv("LLM_MODEL", "gpt-5-nano").strip() or "gpt-5-nano"
     if provider == "auto":
-        provider = "openai" if api_key else "mock"
+        if openrouter_api_key:
+            provider = "openrouter"
+        else:
+            provider = "openai" if api_key else "mock"
+    fast_path_enabled = os.getenv("LLM_FAST_PATH", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     if provider == "mock":
         return MockLLMClient()
     if provider == "openai":
@@ -557,13 +651,19 @@ def create_llm_client() -> LLMClient:
             max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "500")),
             reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "minimal").strip() or None,
         )
-        fast_path_enabled = os.getenv("LLM_FAST_PATH", "true").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }
         return FastPathLLMClient(openai_client) if fast_path_enabled else openai_client
+    if provider == "openrouter":
+        openrouter_client = OpenRouterLLMClient(
+            model=os.getenv(
+                "OPENROUTER_MODEL", "google/gemma-4-31b-it:free"
+            ).strip()
+            or "google/gemma-4-31b-it:free",
+            api_key=openrouter_api_key,
+            timeout_seconds=float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "20")),
+            max_output_tokens=int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "500")),
+            attempts=int(os.getenv("OPENROUTER_ATTEMPTS", "2")),
+        )
+        return FastPathLLMClient(openrouter_client) if fast_path_enabled else openrouter_client
     raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
 
 

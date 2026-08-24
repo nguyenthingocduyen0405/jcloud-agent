@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 import sqlite3
@@ -15,6 +16,7 @@ from app.llm import (
     LLMClientError,
     MockLLMClient,
     OpenAILLMClient,
+    OpenRouterLLMClient,
     create_llm_client,
     strict_llm_decision_schema,
 )
@@ -280,8 +282,20 @@ def test_mock_llm_asks_only_for_required_create_fields():
 def test_auto_provider_uses_mock_without_api_key(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "auto")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     assert isinstance(create_llm_client(), MockLLMClient)
+
+
+def test_auto_provider_prefers_openrouter_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "auto")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("LLM_FAST_PATH", "false")
+
+    llm = create_llm_client()
+
+    assert isinstance(llm, OpenRouterLLMClient)
+    assert llm.model == "google/gemma-4-31b-it:free"
 
 
 def test_cancel_does_not_change_cloud(tmp_path):
@@ -629,6 +643,24 @@ class FakeOpenAIClient:
         self.responses = responses
 
 
+class FakeChatCompletions:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = list(outputs)
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        output = self.outputs.pop(0)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=output))]
+        )
+
+
+class FakeOpenRouterClient:
+    def __init__(self, completions: FakeChatCompletions) -> None:
+        self.chat = SimpleNamespace(completions=completions)
+
+
 def test_openai_uses_strict_schema_timeout_and_output_limit():
     decision = LLMDecision(
         decision_type="answer",
@@ -706,6 +738,48 @@ def test_fast_path_uses_remote_provider_for_unknown_intents():
 
     assert pending_decision.message == "remote: ?"
     assert fallback.calls == 2
+
+
+def test_openrouter_uses_json_mode_schema_and_provider_filter():
+    decision = LLMDecision(decision_type="answer", message="안전한 답변")
+    completions = FakeChatCompletions([decision.model_dump_json()])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        timeout_seconds=8,
+        max_output_tokens=321,
+        attempts=2,
+        client=FakeOpenRouterClient(completions),
+    )
+
+    result = llm.parse_message("현재 머신을 설명해 줘", [], {"instance_names": []})
+
+    assert result.message == "안전한 답변"
+    assert len(completions.calls) == 1
+    request = completions.calls[0]
+    assert request["response_format"] == {"type": "json_object"}
+    assert request["extra_body"] == {"provider": {"require_parameters": True}}
+    assert request["temperature"] == 0
+    assert request["max_tokens"] == 321
+    prompt = json.loads(request["messages"][1]["content"])
+    assert "decision_schema" in prompt
+
+
+def test_openrouter_retries_invalid_json_once():
+    decision = LLMDecision(decision_type="answer", message="두 번째 응답")
+    completions = FakeChatCompletions(["not json", decision.model_dump_json()])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        attempts=2,
+        client=FakeOpenRouterClient(completions),
+    )
+
+    result = llm.parse_message("도와줘", [], {})
+
+    assert result.message == "두 번째 응답"
+    assert len(completions.calls) == 2
+    assert "previous response was invalid" in completions.calls[1]["messages"][0]["content"]
 
 
 def test_openai_timeout_and_invalid_output_are_safe(tmp_path):

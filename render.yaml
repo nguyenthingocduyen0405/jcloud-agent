@@ -25,3 +25,13 @@ services:
         value: minimal
       - key: LLM_FAST_PATH
         value: true
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemma-4-31b-it:free
+      - key: OPENROUTER_TIMEOUT_SECONDS
+        value: 20
+      - key: OPENROUTER_MAX_OUTPUT_TOKENS
+        value: 500
+      - key: OPENROUTER_ATTEMPTS
+        value: 2

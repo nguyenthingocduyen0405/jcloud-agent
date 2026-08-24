@@ -47,13 +47,16 @@ Copy-Item .env.example .env
 
 ### 자동 선택 모드로 실행
 
-기본 `auto` 모드는 API 키가 있으면 OpenAI를 사용하고, 키가 없으면 인터넷 연결이 필요 없는
+기본 `auto` 모드는 `OPENROUTER_API_KEY`가 있으면 OpenRouter를 우선 사용하고, 그렇지 않으면
+`LLM_API_KEY`가 있을 때 OpenAI를 사용합니다. 두 키가 모두 없으면 인터넷 연결이 필요 없는
 `MockLLMClient`를 안전한 fallback으로 사용합니다.
 
 ```dotenv
 LLM_PROVIDER=auto
 LLM_MODEL=gpt-5-nano
 LLM_API_KEY=
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=google/gemma-4-31b-it:free
 ```
 
 항상 mock만 사용하려면 `LLM_PROVIDER=mock`으로 지정하세요. 자동화 테스트는 외부 API를 호출하지
@@ -70,6 +73,23 @@ LLM_API_KEY=여기에-실제-API-키-입력
 ```
 
 계정에서 사용할 수 있고 Responses API와 Structured Outputs를 지원하는 모델을 선택해야 합니다. OpenAI 어댑터는 `store=false`로 요청하고 도구를 구성하지 않으며, 모든 출력을 Pydantic의 `LLMDecision`으로 다시 검증합니다. Provider 오류가 발생하거나 출력이 유효하지 않으면 백엔드는 안전한 오류 메시지만 반환하고 operation을 생성하지 않습니다.
+
+### 무료 OpenRouter 모델로 실행
+
+한국어 자연어 요청을 위한 기본 무료 모델은 `google/gemma-4-31b-it:free`입니다. OpenRouter
+Dashboard에서 API 키를 만든 뒤 `.env` 또는 Render secret에만 저장하세요.
+
+```dotenv
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=여기에-실제-OpenRouter-API-키-입력
+OPENROUTER_MODEL=google/gemma-4-31b-it:free
+OPENROUTER_TIMEOUT_SECONDS=20
+OPENROUTER_MAX_OUTPUT_TOKENS=500
+OPENROUTER_ATTEMPTS=2
+```
+
+무료 Gemma endpoint는 JSON object 출력을 요청하고 모든 응답을 `LLMDecision`으로 다시
+검증합니다. 잘못된 JSON은 한 번만 재시도하며, 두 번 모두 실패하면 operation을 만들지 않습니다.
 
 Provider 설정을 변경한 후에는 백엔드를 다시 시작해야 합니다.
 
@@ -106,8 +126,9 @@ npm.cmd run dev
 
 저장소 루트의 `render.yaml`은 FastAPI와 React 정적 빌드를 하나의 공개 Web Service로 배포합니다. Render에서 이 GitHub 저장소를 Blueprint로 연결하면 자동으로 빌드하고 `onrender.com` URL을 발급합니다.
 
-- 배포 모드는 `LLM_PROVIDER=auto`입니다. Render의 `LLM_API_KEY` secret을 설정하면 OpenAI를
-  사용하고, 설정하지 않으면 mock fallback을 사용합니다.
+- 배포 모드는 `LLM_PROVIDER=auto`입니다. Render의 `OPENROUTER_API_KEY` secret을 설정하면 무료
+  Gemma 모델을 우선 사용합니다. OpenRouter 키가 없고 `LLM_API_KEY`만 있으면 OpenAI를 사용하며,
+  두 키가 모두 없으면 mock fallback을 사용합니다.
 - API 키는 Render Dashboard의 secret 환경 변수로만 설정하며 저장소에 커밋하지 않습니다.
 - 프로덕션 React 빌드는 FastAPI와 같은 origin에서 제공됩니다.
 - `main` 브랜치에 push하면 Render가 자동으로 다시 배포합니다.
@@ -143,9 +164,9 @@ LLM_FAST_PATH=true
 ```
 
 `LLM_FAST_PATH=true`이면 목록, quota, 생성, 시작, 중지, 재부팅처럼 로컬 규칙이 확실하게
-해석할 수 있는 요청은 OpenAI 호출 없이 즉시 처리합니다. 로컬 규칙이 확신할 수 없는 요청만
-OpenAI provider로 전달됩니다. `/api/health`에 `openai+fast-path`가 표시되면 이 최적화가
-활성화된 것입니다. `LLM_REASONING_EFFORT=minimal`은 기본 `gpt-5-nano`의 분류·라우팅 작업에서
+해석할 수 있는 요청은 외부 LLM 호출 없이 즉시 처리합니다. 로컬 규칙이 확신할 수 없는 요청만
+선택된 provider로 전달됩니다. `/api/health`에 `openrouter+fast-path` 또는 `openai+fast-path`가
+표시되면 이 최적화가 활성화된 것입니다. `LLM_REASONING_EFFORT=minimal`은 `gpt-5-nano`의 분류·라우팅 작업에서
 불필요한 추론 시간을 줄입니다. 다른 모델로 변경할 때는 해당 모델이 지원하는 reasoning effort를
 확인하거나 빈 값으로 설정하세요.
 
