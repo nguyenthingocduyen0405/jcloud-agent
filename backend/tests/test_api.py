@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.cloud import MockCloudClient
 from app.database import Repository
 from app.llm import (
+    FastPathLLMClient,
     LLMClient,
     LLMClientError,
     MockLLMClient,
@@ -639,6 +640,7 @@ def test_openai_uses_strict_schema_timeout_and_output_limit():
         "test-key",
         timeout_seconds=7.5,
         max_output_tokens=321,
+        reasoning_effort="minimal",
         client=FakeOpenAIClient(responses),
     )
 
@@ -647,7 +649,63 @@ def test_openai_uses_strict_schema_timeout_and_output_limit():
     assert responses.kwargs["text"]["format"]["strict"] is True
     assert responses.kwargs["max_output_tokens"] == 321
     assert responses.kwargs["timeout"] == 7.5
+    assert responses.kwargs["reasoning"] == {"effort": "minimal"}
     assert_strict_objects(strict_llm_decision_schema())
+
+
+class CountingLLMClient(LLMClient):
+    provider_name = "counting"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def parse_message(
+        self,
+        message: str,
+        conversation_context: list[dict[str, str]],
+        cloud_context: dict[str, Any],
+    ) -> LLMDecision:
+        self.calls += 1
+        return LLMDecision(decision_type="answer", message=f"remote: {message}")
+
+
+def test_fast_path_skips_remote_provider_for_known_intents():
+    fallback = CountingLLMClient()
+    llm = FastPathLLMClient(fallback)
+    cloud_context = {
+        "quota": {"available_vcpus": 13, "available_ram_gb": 58},
+    }
+
+    decision = llm.parse_message("CPU còn bao nhiêu?", [], cloud_context)
+
+    assert decision.action == "get_quota"
+    assert fallback.calls == 0
+    assert llm.provider_name == "counting+fast-path"
+
+
+def test_fast_path_uses_remote_provider_for_unknown_intents():
+    fallback = CountingLLMClient()
+    llm = FastPathLLMClient(fallback)
+
+    decision = llm.parse_message("Giải thích kiến trúc điện toán đám mây", [], {})
+
+    assert decision.message.startswith("remote:")
+    assert fallback.calls == 1
+
+    pending_decision = llm.parse_message(
+        "?",
+        [],
+        {
+            "pending_request": {
+                "action": "plan_create_instance",
+                "language": "vi",
+                "parameters": {},
+            }
+        },
+    )
+
+    assert pending_decision.message == "remote: ?"
+    assert fallback.calls == 2
 
 
 def test_openai_timeout_and_invalid_output_are_safe(tmp_path):

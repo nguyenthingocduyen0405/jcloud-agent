@@ -21,3 +21,7 @@ services:
         value: 15
       - key: LLM_MAX_OUTPUT_TOKENS
         value: 500
+      - key: LLM_REASONING_EFFORT
+        value: minimal
+      - key: LLM_FAST_PATH
+        value: true

@@ -138,7 +138,16 @@ OpenAI provider는 strict Structured Outputs를 사용하며 요청마다 기본
 ```dotenv
 LLM_TIMEOUT_SECONDS=15
 LLM_MAX_OUTPUT_TOKENS=500
+LLM_REASONING_EFFORT=minimal
+LLM_FAST_PATH=true
 ```
+
+`LLM_FAST_PATH=true`이면 목록, quota, 생성, 시작, 중지, 재부팅처럼 로컬 규칙이 확실하게
+해석할 수 있는 요청은 OpenAI 호출 없이 즉시 처리합니다. 로컬 규칙이 확신할 수 없는 요청만
+OpenAI provider로 전달됩니다. `/api/health`에 `openai+fast-path`가 표시되면 이 최적화가
+활성화된 것입니다. `LLM_REASONING_EFFORT=minimal`은 기본 `gpt-5-nano`의 분류·라우팅 작업에서
+불필요한 추론 시간을 줄입니다. 다른 모델로 변경할 때는 해당 모델이 지원하는 reasoning effort를
+확인하거나 빈 값으로 설정하세요.
 
 프런트엔드는 현재 메시지를 제외한 최근 대화 텍스트를 최대 10개까지 `conversation_context`로 전송합니다. operation payload와 민감한 값은 대화 context에 포함하지 않습니다. Ubuntu 버전을 생략하면 백엔드는 검증된 `Ubuntu 24.04` image를 기본으로 선택하고, 사용자 응답에도 기본 선택임을 명시합니다. `Ubuntu 22.04` 또는 `Ubuntu 24.04`를 지정하면 해당 버전과 정확히 일치하는 image만 사용합니다.
 

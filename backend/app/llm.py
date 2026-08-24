@@ -419,6 +419,39 @@ class MockLLMClient(LLMClient):
         )
 
 
+class FastPathLLMClient(LLMClient):
+    """Resolve high-confidence VM intents locally before using a remote provider."""
+
+    def __init__(self, fallback: LLMClient) -> None:
+        self.fallback = fallback
+        self.local = MockLLMClient()
+        self.provider_name = f"{fallback.provider_name}+fast-path"
+
+    def parse_message(
+        self,
+        message: str,
+        conversation_context: list[dict[str, str]],
+        cloud_context: dict[str, Any],
+    ) -> LLMDecision:
+        local_decision = self.local.parse_message(
+            message,
+            conversation_context,
+            cloud_context,
+        )
+        stored_pending = cloud_context.get("pending_request")
+        fallback_language = (
+            stored_pending.get("language", "ko") if isinstance(stored_pending, dict) else "ko"
+        )
+        language = detect_language(message, conversation_context, fallback_language)
+        is_generic_fallback = (
+            local_decision.decision_type == "answer"
+            and local_decision.message == _message("capabilities", language)
+        )
+        if not is_generic_fallback:
+            return local_decision
+        return self.fallback.parse_message(message, conversation_context, cloud_context)
+
+
 class OpenAILLMClient(LLMClient):
     """OpenAI Responses API adapter. It receives no tools and cannot execute cloud actions."""
 
@@ -431,6 +464,7 @@ class OpenAILLMClient(LLMClient):
         *,
         timeout_seconds: float = 15.0,
         max_output_tokens: int = 500,
+        reasoning_effort: str | None = None,
         client: Any | None = None,
     ) -> None:
         if not model:
@@ -440,6 +474,7 @@ class OpenAILLMClient(LLMClient):
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
+        self.reasoning_effort = reasoning_effort
         if client is None:
             from openai import OpenAI
 
@@ -458,13 +493,13 @@ class OpenAILLMClient(LLMClient):
             "message": message,
         }
         try:
-            response = self.client.responses.create(
-                model=self.model,
-                store=False,
-                max_output_tokens=self.max_output_tokens,
-                instructions=SYSTEM_INSTRUCTIONS,
-                input=json.dumps(prompt_payload, ensure_ascii=False),
-                text={
+            request_options: dict[str, Any] = {
+                "model": self.model,
+                "store": False,
+                "max_output_tokens": self.max_output_tokens,
+                "instructions": SYSTEM_INSTRUCTIONS,
+                "input": json.dumps(prompt_payload, ensure_ascii=False),
+                "text": {
                     "format": {
                         "type": "json_schema",
                         "name": "jcloud_decision",
@@ -472,7 +507,12 @@ class OpenAILLMClient(LLMClient):
                         "strict": True,
                     }
                 },
-                timeout=self.timeout_seconds,
+                "timeout": self.timeout_seconds,
+            }
+            if self.reasoning_effort:
+                request_options["reasoning"] = {"effort": self.reasoning_effort}
+            response = self.client.responses.create(
+                **request_options,
             )
             return LLMDecision.model_validate_json(response.output_text)
         except Exception as exc:
@@ -510,12 +550,20 @@ def create_llm_client() -> LLMClient:
     if provider == "mock":
         return MockLLMClient()
     if provider == "openai":
-        return OpenAILLMClient(
+        openai_client = OpenAILLMClient(
             model=model,
             api_key=api_key,
             timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "15")),
             max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "500")),
+            reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "minimal").strip() or None,
         )
+        fast_path_enabled = os.getenv("LLM_FAST_PATH", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        return FastPathLLMClient(openai_client) if fast_path_enabled else openai_client
     raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
 
 
