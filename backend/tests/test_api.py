@@ -168,6 +168,27 @@ def test_multi_turn_create_accepts_a_short_vcpu_answer(tmp_path):
             assert operation["payload"]["flavor"] == "large"
 
 
+def test_multi_turn_create_accepts_a_short_instance_name(tmp_path):
+    with client(tmp_path) as api:
+        original = "Ubuntu 24.04, 4 CPU, RAM 16 GB 머신을 생성해 줘."
+        response = api.post(
+            "/api/chat",
+            json={
+                "message": "test",
+                "conversation_context": [
+                    {"role": "user", "content": original},
+                    {"role": "assistant", "content": "생성할 인스턴스의 이름을 알려주세요."},
+                ],
+            },
+        ).json()
+
+        operation = response["operation"]
+        assert operation["status"] == "waiting_for_confirmation"
+        assert operation["payload"]["name"] == "test"
+        assert operation["payload"]["image"] == "Ubuntu 24.04"
+        assert operation["payload"]["flavor"] == "large"
+
+
 def test_pending_create_state_accumulates_across_four_requests(tmp_path):
     with client(tmp_path) as api:
         first = api.post("/api/chat", json={"message": "Tạo máy"}).json()
@@ -766,6 +787,27 @@ def test_fast_path_answers_korean_vm_recommendations_locally():
         assert "13 vCPU" in decision.message
         assert "medium" in decision.message
 
+    assert fallback.calls == 0
+
+
+def test_fast_path_accepts_short_instance_name_after_korean_question():
+    fallback = CountingLLMClient()
+    llm = FastPathLLMClient(fallback)
+    original = "Ubuntu 24.04, 4 CPU, RAM 16 GB 머신을 생성해 줘."
+    context = [
+        {"role": "user", "content": original},
+        {"role": "assistant", "content": "생성할 인스턴스의 이름을 알려주세요."},
+    ]
+
+    decision = llm.parse_message("test", context, {})
+
+    assert decision.decision_type == "action"
+    assert decision.action == "plan_create_instance"
+    assert decision.parameters.name == "test"
+    assert decision.parameters.operating_system == "ubuntu"
+    assert decision.parameters.operating_system_version == "24.04"
+    assert decision.parameters.vcpus == 4
+    assert decision.parameters.ram_gb == 16
     assert fallback.calls == 0
 
 

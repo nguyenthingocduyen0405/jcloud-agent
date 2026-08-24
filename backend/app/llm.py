@@ -222,6 +222,8 @@ def _missing_create_fields(assistant_text: str) -> frozenset[str]:
         fields.add("ram_gb")
     if _has_any(assistant_text, ("운영체제", "hệ điều hành", "operating system")):
         fields.add("operating_system")
+    if _has_any(assistant_text, ("인스턴스의 이름", "머신 이름", "instance name", "tên instance", "tên máy")):
+        fields.add("name")
     return frozenset(fields)
 
 
@@ -252,6 +254,11 @@ def _normalize_create_followup(text: str, missing_fields: frozenset[str]) -> str
         or ("operating_system" in missing_fields and "ubuntu" in text)
     ):
         return text
+
+    if missing_fields == {"name"} and re.fullmatch(
+        r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}", text
+    ):
+        return f"name {text}"
 
     number_match = re.fullmatch(r"(\d+)(?:\s*개)?", text)
     if not number_match or len(missing_fields) != 1:
@@ -334,6 +341,10 @@ class MockLLMClient(LLMClient):
             if stored_pending and stored_pending.get("action") == "plan_create_instance":
                 stored_parameters = stored_pending.get("parameters", {})
                 missing_fields = _required_create_fields(stored_parameters)
+                if conversation_context and conversation_context[-1].get("role") == "assistant":
+                    missing_fields = missing_fields | _missing_create_fields(
+                        _plain(conversation_context[-1].get("content", ""))
+                    )
                 followup = _normalize_create_followup(text, missing_fields)
                 if followup:
                     analysis_text = _pending_create_prompt(stored_parameters, followup)
@@ -721,7 +732,8 @@ list_flavors, plan_create_instance, start_instance, stop_instance, and reboot_in
 
 Use cloud_context as the source of truth for quota, images, flavors, and instance names. For read-only
 requests, provide a concise, useful message using those values. For a create request, operating system,
-vCPU count, and RAM are required; GPU is optional and defaults to false. Ask only for required fields
+vCPU count, and RAM are required; GPU is optional and defaults to false. The instance name is optional;
+when it is absent, do not ask for it because the backend will choose a safe default. Ask only for required fields
 that are actually missing. Understand equivalent parameter orders such as "4 CPU", "CPU 4", and
 "CPU 4개". Extract Ubuntu 22.04 or 24.04 into operating_system_version. If the user only says Ubuntu,
 leave operating_system_version null and explicitly say Ubuntu 24.04 will be selected by default.
