@@ -45,17 +45,19 @@ LLM은 사용자의 의도를 이해하고 구조화된 JSON을 반환하는 역
 Copy-Item .env.example .env
 ```
 
-### MockLLMClient로 실행
+### 자동 선택 모드로 실행
 
-API 키와 인터넷 연결이 필요하지 않습니다.
+기본 `auto` 모드는 API 키가 있으면 OpenAI를 사용하고, 키가 없으면 인터넷 연결이 필요 없는
+`MockLLMClient`를 안전한 fallback으로 사용합니다.
 
 ```dotenv
-LLM_PROVIDER=mock
-LLM_MODEL=
+LLM_PROVIDER=auto
+LLM_MODEL=gpt-5-nano
 LLM_API_KEY=
 ```
 
-기본 실행 모드이며 자동화 테스트에서도 이 모드를 사용합니다.
+항상 mock만 사용하려면 `LLM_PROVIDER=mock`으로 지정하세요. 자동화 테스트는 외부 API를 호출하지
+않도록 항상 `MockLLMClient`를 주입합니다.
 
 ### OpenAI로 실행
 
@@ -63,7 +65,7 @@ API 키는 반드시 프로젝트 루트의 `.env` 파일에만 저장하세요.
 
 ```dotenv
 LLM_PROVIDER=openai
-LLM_MODEL=gpt-5-mini
+LLM_MODEL=gpt-5-nano
 LLM_API_KEY=여기에-실제-API-키-입력
 ```
 
@@ -104,8 +106,9 @@ npm.cmd run dev
 
 저장소 루트의 `render.yaml`은 FastAPI와 React 정적 빌드를 하나의 공개 Web Service로 배포합니다. Render에서 이 GitHub 저장소를 Blueprint로 연결하면 자동으로 빌드하고 `onrender.com` URL을 발급합니다.
 
-- 배포 모드는 항상 `LLM_PROVIDER=mock`입니다.
-- API 키나 OpenStack credential은 필요하지 않습니다.
+- 배포 모드는 `LLM_PROVIDER=auto`입니다. Render의 `LLM_API_KEY` secret을 설정하면 OpenAI를
+  사용하고, 설정하지 않으면 mock fallback을 사용합니다.
+- API 키는 Render Dashboard의 secret 환경 변수로만 설정하며 저장소에 커밋하지 않습니다.
 - 프로덕션 React 빌드는 FastAPI와 같은 origin에서 제공됩니다.
 - `main` 브랜치에 push하면 Render가 자동으로 다시 배포합니다.
 - free Web Service의 로컬 파일 시스템은 영구 저장소가 아닙니다. 따라서 SQLite 데이터는 service restart, redeploy 또는 spin-down 후 초기 mock 데이터로 돌아갈 수 있습니다.
@@ -130,7 +133,7 @@ parse_message(message, conversation_context, cloud_context)
 
 인스턴스 삭제, 셸 명령 실행, controller/compute node 변경, 공유 네트워크 변경, 전체 방화벽 개방은 지원하지 않습니다.
 
-OpenAI provider는 strict Structured Outputs를 사용하며 요청마다 기본 15초 timeout과 500 output-token 제한을 적용합니다. 다음 환경 변수로 값을 조정할 수 있습니다.
+OpenAI provider는 strict Structured Outputs를 사용하며 요청마다 기본 15초 timeout과 500 output-token 제한을 적용합니다. 현재 실제로 선택된 provider는 `/api/health`의 `llm_provider`에서 확인할 수 있습니다. 다음 환경 변수로 값을 조정할 수 있습니다.
 
 ```dotenv
 LLM_TIMEOUT_SECONDS=15

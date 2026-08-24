@@ -49,7 +49,7 @@ def create_app(
     repository = Repository(resolved_path)
     cloud = cloud_client or MockCloudClient(repository)
     llm = llm_client or create_llm_client()
-    llm_provider = os.getenv("LLM_PROVIDER", "mock").strip().lower()
+    llm_provider = getattr(llm, "provider_name", "unknown")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -136,8 +136,7 @@ def create_app(
             return ChatResponse(message=decision.message, data=instances)
         if decision.action == "get_quota":
             quota = cloud.get_quota(identity.session_id)
-            message = f"사용 가능한 자원은 {quota['available_vcpus']} vCPU와 RAM {quota['available_ram_gb']} GB입니다."
-            return ChatResponse(message=message, data=quota)
+            return ChatResponse(message=decision.message, data=quota)
         if decision.action == "list_images":
             return ChatResponse(message=decision.message, data=cloud.list_images())
         if decision.action == "list_flavors":
