@@ -740,7 +740,7 @@ def test_fast_path_uses_remote_provider_for_unknown_intents():
     assert fallback.calls == 2
 
 
-def test_openrouter_uses_json_mode_schema_and_provider_filter():
+def test_openrouter_uses_json_mode_without_restricting_free_provider_routing():
     decision = LLMDecision(decision_type="answer", message="안전한 답변")
     completions = FakeChatCompletions([decision.model_dump_json()])
     llm = OpenRouterLLMClient(
@@ -758,7 +758,7 @@ def test_openrouter_uses_json_mode_schema_and_provider_filter():
     assert len(completions.calls) == 1
     request = completions.calls[0]
     assert request["response_format"] == {"type": "json_object"}
-    assert request["extra_body"] == {"provider": {"require_parameters": True}}
+    assert request["extra_body"] == {"reasoning": {"effort": "none"}}
     assert request["temperature"] == 0
     assert request["max_tokens"] == 321
     prompt = json.loads(request["messages"][1]["content"])
@@ -780,6 +780,19 @@ def test_openrouter_retries_invalid_json_once():
     assert result.message == "두 번째 응답"
     assert len(completions.calls) == 2
     assert "previous response was invalid" in completions.calls[1]["messages"][0]["content"]
+    assert "response_format" not in completions.calls[1]
+
+
+def test_openrouter_accepts_json_wrapped_in_markdown():
+    decision = LLMDecision(decision_type="answer", message="정상 응답")
+    completions = FakeChatCompletions([f"```json\n{decision.model_dump_json()}\n```"])
+    llm = OpenRouterLLMClient(
+        "google/gemma-4-31b-it:free",
+        "test-key",
+        client=FakeOpenRouterClient(completions),
+    )
+
+    assert llm.parse_message("설명해 줘", [], {}).message == "정상 응답"
 
 
 def test_openai_timeout_and_invalid_output_are_safe(tmp_path):

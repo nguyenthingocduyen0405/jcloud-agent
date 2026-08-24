@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -8,6 +9,9 @@ from copy import deepcopy
 from typing import Any
 
 from .schemas import ActionParameters, LLMDecision
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClientError(RuntimeError):
@@ -576,9 +580,9 @@ class OpenRouterLLMClient(LLMClient):
                 else ""
             )
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+                request_options: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
                         {
                             "role": "system",
                             "content": f"{SYSTEM_INSTRUCTIONS}{retry_instruction}",
@@ -588,19 +592,53 @@ class OpenRouterLLMClient(LLMClient):
                             "content": json.dumps(prompt_payload, ensure_ascii=False),
                         },
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=self.max_output_tokens,
-                    timeout=self.timeout_seconds,
-                    extra_body={"provider": {"require_parameters": True}},
-                )
+                    "temperature": 0,
+                    "max_tokens": self.max_output_tokens,
+                    "timeout": self.timeout_seconds,
+                    "extra_body": {"reasoning": {"effort": "none"}},
+                }
+                if attempt == 0:
+                    request_options["response_format"] = {"type": "json_object"}
+                response = self.client.chat.completions.create(**request_options)
                 content = response.choices[0].message.content
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("OpenRouter returned no JSON content")
-                return LLMDecision.model_validate_json(content)
+                return _parse_openrouter_decision(content)
             except Exception as exc:
                 last_error = exc
+                logger.warning(
+                    "OpenRouter attempt %s/%s failed (%s): %s",
+                    attempt + 1,
+                    self.attempts,
+                    type(exc).__name__,
+                    str(exc)[:500],
+                )
         raise LLMClientError("OpenRouter did not return a valid decision") from last_error
+
+
+def _parse_openrouter_decision(content: str) -> LLMDecision:
+    """Validate JSON even when a model wraps it in Markdown or brief prose."""
+    stripped = content.strip()
+    candidates = [stripped]
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL | re.IGNORECASE
+    )
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    opening_brace = stripped.find("{")
+    if opening_brace >= 0:
+        try:
+            value, _ = json.JSONDecoder().raw_decode(stripped[opening_brace:])
+            candidates.append(json.dumps(value, ensure_ascii=False))
+        except json.JSONDecodeError:
+            pass
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return LLMDecision.model_validate_json(candidate)
+        except (ValueError, TypeError) as exc:
+            last_error = exc
+    raise ValueError("OpenRouter response did not match the decision schema") from last_error
 
 
 SYSTEM_INSTRUCTIONS = """Act as the natural-language planner for a safe JCloud assistant.
