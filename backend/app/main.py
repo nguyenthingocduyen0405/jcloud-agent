@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from .cloud import CloudClient, MockCloudClient
 from .database import Repository, utc_now
-from .llm import LLMClient, LLMClientError, create_llm_client
+from .llm import LLMClient, LLMClientError, create_llm_client, detect_language
 from .policy import ALLOWED_ACTIONS, MUTATING_ACTIONS, contains_sensitive_value, is_prohibited_request
 from .schemas import (
     ActionParameters,
@@ -92,10 +92,20 @@ def create_app(
                 message="대화에 API key, token, 비밀번호 또는 private key를 입력하지 마세요. 이 요청은 LLM에 전달되지 않았습니다."
             )
         if is_prohibited_request(request.message):
+            repository.clear_pending_request(
+                session_id=identity.session_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+            )
             return ChatResponse(
                 message="이 요청은 JCloud Agent의 안전 범위를 벗어나므로 지원되지 않습니다."
             )
 
+        pending_request = repository.get_pending_request(
+            session_id=identity.session_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
+        )
         cloud_context = {
             "quota": cloud.get_quota(identity.session_id),
             "images": [
@@ -113,6 +123,7 @@ def create_app(
             "instance_names": [
                 instance["name"] for instance in cloud.list_instances(identity.session_id)
             ],
+            "pending_request": pending_request,
         }
         try:
             raw_decision = llm.parse_message(
@@ -126,11 +137,48 @@ def create_app(
                 message="현재 요청을 안전하게 해석할 수 없습니다. 어떠한 작업도 실행되지 않았습니다."
             )
 
+        if decision.decision_type == "clarification":
+            if decision.pending_action == "plan_create_instance":
+                parameters = merge_action_parameters(
+                    pending_request["parameters"] if pending_request else None,
+                    decision.parameters,
+                )
+                repository.upsert_pending_request(
+                    session_id=identity.session_id,
+                    user_id=identity.user_id,
+                    project_id=identity.project_id,
+                    action="plan_create_instance",
+                    language=detect_language(
+                        request.message,
+                        [item.model_dump() for item in request.conversation_context],
+                        pending_request.get("language", "ko") if pending_request else "ko",
+                    ),
+                    parameters=parameters.model_dump(),
+                )
+            elif pending_request:
+                repository.clear_pending_request(
+                    session_id=identity.session_id,
+                    user_id=identity.user_id,
+                    project_id=identity.project_id,
+                )
+            return ChatResponse(message=decision.message)
         if decision.decision_type != "action":
+            if pending_request:
+                repository.clear_pending_request(
+                    session_id=identity.session_id,
+                    user_id=identity.user_id,
+                    project_id=identity.project_id,
+                )
             return ChatResponse(message=decision.message)
         if decision.action not in ALLOWED_ACTIONS:
             return ChatResponse(message="이 작업은 아직 지원되지 않습니다.")
 
+        if decision.action != "plan_create_instance" and pending_request:
+            repository.clear_pending_request(
+                session_id=identity.session_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+            )
         if decision.action == "list_instances":
             instances = cloud.list_instances(identity.session_id)
             return ChatResponse(message=decision.message, data=instances)
@@ -147,12 +195,16 @@ def create_app(
         response_message = decision.message
         try:
             if decision.action == "plan_create_instance":
-                uses_default_ubuntu = (
-                    decision.parameters.operating_system is not None
-                    and decision.parameters.operating_system.strip().lower() == "ubuntu"
-                    and decision.parameters.operating_system_version is None
+                create_parameters = merge_action_parameters(
+                    pending_request["parameters"] if pending_request else None,
+                    decision.parameters,
                 )
-                payload = resolve_instance_plan(decision.parameters, cloud)
+                uses_default_ubuntu = (
+                    create_parameters.operating_system is not None
+                    and create_parameters.operating_system.strip().lower() == "ubuntu"
+                    and create_parameters.operating_system_version is None
+                )
+                payload = resolve_instance_plan(create_parameters, cloud)
                 cloud.plan_create_instance(identity.session_id, payload)
                 if uses_default_ubuntu and "24.04" not in response_message:
                     response_message += " Ubuntu 버전을 지정하지 않아 Ubuntu 24.04를 기본으로 선택합니다."
@@ -194,6 +246,11 @@ def create_app(
                 "created_at": now,
                 "updated_at": now,
             }
+        )
+        repository.clear_pending_request(
+            session_id=identity.session_id,
+            user_id=identity.user_id,
+            project_id=identity.project_id,
         )
         return ChatResponse(
             message=f"{response_message} 계획이 준비되었습니다. 실행 전에 확인해 주세요.",
@@ -285,6 +342,16 @@ def create_app(
         application.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
     return application
+
+
+def merge_action_parameters(
+    existing: dict[str, Any] | None, incoming: ActionParameters
+) -> ActionParameters:
+    merged = dict(existing or {})
+    for field, value in incoming.model_dump().items():
+        if value is not None:
+            merged[field] = value
+    return ActionParameters.model_validate(merged)
 
 
 def resolve_instance_plan(parameters: ActionParameters, cloud: CloudClient) -> dict[str, Any]:

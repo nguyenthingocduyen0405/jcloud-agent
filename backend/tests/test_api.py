@@ -154,13 +154,7 @@ def test_multi_turn_create_accepts_a_short_vcpu_answer(tmp_path):
             second = api.post(
                 "/api/chat",
                 headers=headers,
-                json={
-                    "message": followup,
-                    "conversation_context": [
-                        {"role": "user", "content": first_user_message},
-                        {"role": "assistant", "content": first["message"]},
-                    ],
-                },
+                json={"message": followup},
             ).json()
 
             operation = second["operation"]
@@ -169,6 +163,92 @@ def test_multi_turn_create_accepts_a_short_vcpu_answer(tmp_path):
             assert operation["payload"]["vcpus"] == 4
             assert operation["payload"]["ram_gb"] == 16
             assert operation["payload"]["flavor"] == "large"
+
+
+def test_pending_create_state_accumulates_across_four_requests(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post("/api/chat", json={"message": "Tạo máy"}).json()
+        assert first["operation"] is None
+        assert "hệ điều hành" in first["message"]
+
+        second = api.post("/api/chat", json={"message": "Ubuntu 24.04"}).json()
+        assert second["operation"] is None
+        assert "vCPU" in second["message"]
+        assert "RAM" in second["message"]
+
+        third = api.post("/api/chat", json={"message": "RAM 16 GB"}).json()
+        assert third["operation"] is None
+        assert third["message"] == "Vui lòng cho biết thêm: vCPU."
+
+        fourth = api.post("/api/chat", json={"message": "4"}).json()
+        operation = fourth["operation"]
+        assert operation["status"] == "waiting_for_confirmation"
+        assert operation["payload"]["image"] == "Ubuntu 24.04"
+        assert operation["payload"]["vcpus"] == 4
+        assert operation["payload"]["ram_gb"] == 16
+        assert operation["payload"]["flavor"] == "large"
+
+
+def test_pending_create_state_is_cleared_on_topic_change(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post(
+            "/api/chat", json={"message": "Tạo máy Ubuntu 24.04 RAM 16 GB"}
+        ).json()
+        assert first["operation"] is None
+
+        listed = api.post("/api/chat", json={"message": "Cho tôi xem danh sách máy ảo"}).json()
+        assert listed["operation"] is None
+        assert listed["data"] is not None
+
+        followup = api.post("/api/chat", json={"message": "4"}).json()
+        assert followup["operation"] is None
+
+
+def test_pending_create_state_is_cleared_after_operation_is_planned(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post(
+            "/api/chat", json={"message": "Create VM Ubuntu 24.04 with RAM 16 GB"}
+        ).json()
+        assert first["operation"] is None
+
+        planned = api.post("/api/chat", json={"message": "4 vCPU"}).json()
+        assert planned["operation"]["status"] == "waiting_for_confirmation"
+
+        followup = api.post("/api/chat", json={"message": "8"}).json()
+        assert followup["operation"] is None
+
+
+def test_pending_create_state_is_cleared_on_sandbox_reset(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post(
+            "/api/chat", json={"message": "Tạo máy Ubuntu 24.04 RAM 16 GB"}
+        ).json()
+        assert first["operation"] is None
+
+        assert api.post("/api/sandbox/reset").status_code == 200
+
+        followup = api.post("/api/chat", json={"message": "4"}).json()
+        assert followup["operation"] is None
+
+
+def test_pending_create_state_is_isolated_by_session(tmp_path):
+    with client(tmp_path) as api:
+        first = api.post(
+            "/api/chat",
+            headers=SESSION_A_HEADERS,
+            json={"message": "Tạo máy Ubuntu 24.04 RAM 16 GB"},
+        ).json()
+        assert first["operation"] is None
+
+        other_session = api.post(
+            "/api/chat", headers=SESSION_B_HEADERS, json={"message": "4"}
+        ).json()
+        assert other_session["operation"] is None
+
+        same_session = api.post(
+            "/api/chat", headers=SESSION_A_HEADERS, json={"message": "4"}
+        ).json()
+        assert same_session["operation"]["payload"]["vcpus"] == 4
 
 
 def test_mock_llm_only_continues_an_immediately_pending_create():

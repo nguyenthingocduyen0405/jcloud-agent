@@ -50,7 +50,11 @@ def _has_any(text: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in text for phrase in phrases)
 
 
-def _language(text: str, conversation_context: list[dict[str, str]]) -> str:
+def detect_language(
+    text: str,
+    conversation_context: list[dict[str, str]],
+    fallback: str = "ko",
+) -> str:
     candidates = [text, *(
         item.get("content", "")
         for item in reversed(conversation_context)
@@ -70,7 +74,7 @@ def _language(text: str, conversation_context: list[dict[str, str]]) -> str:
             ("please", "show", "list", "create", "start", "stop", "reboot", "how much"),
         ):
             return "en"
-    return "ko"
+    return fallback
 
 
 MESSAGES = {
@@ -190,6 +194,38 @@ def _normalize_create_followup(text: str, missing_fields: frozenset[str]) -> str
     return None
 
 
+def _required_create_fields(parameters: dict[str, Any]) -> frozenset[str]:
+    missing = set()
+    if not parameters.get("operating_system"):
+        missing.add("operating_system")
+    if parameters.get("vcpus") is None:
+        missing.add("vcpus")
+    if parameters.get("ram_gb") is None:
+        missing.add("ram_gb")
+    return frozenset(missing)
+
+
+def _pending_create_prompt(parameters: dict[str, Any], followup: str) -> str:
+    parts = ["create instance"]
+    operating_system = parameters.get("operating_system")
+    if operating_system:
+        parts.append(str(operating_system))
+    version = parameters.get("operating_system_version")
+    if version:
+        parts.append(str(version))
+    if parameters.get("vcpus") is not None:
+        parts.append(f"{parameters['vcpus']} vcpu")
+    if parameters.get("ram_gb") is not None:
+        parts.append(f"ram {parameters['ram_gb']} gb")
+    if parameters.get("requires_gpu") is False:
+        parts.append("no gpu")
+    name = parameters.get("name")
+    if name:
+        parts.append(f"name {name}")
+    parts.append(followup)
+    return " ".join(parts)
+
+
 def _instance_name(text: str) -> str | None:
     value = _plain(text)
     for pattern in (
@@ -215,11 +251,35 @@ class MockLLMClient(LLMClient):
         cloud_context: dict[str, Any],
     ) -> LLMDecision:
         text = _plain(message.strip())
-        language = _language(message, conversation_context)
+        stored_pending = cloud_context.get("pending_request")
+        fallback_language = (
+            stored_pending.get("language", "ko") if isinstance(stored_pending, dict) else "ko"
+        )
+        language = detect_language(message, conversation_context, fallback_language)
         analysis_text = text
+        pending_create = None
         if not _has_any(text, CREATE_PHRASES):
-            pending_create = _pending_create_context(conversation_context)
-            if pending_create:
+            if stored_pending and stored_pending.get("action") == "plan_create_instance":
+                stored_parameters = stored_pending.get("parameters", {})
+                missing_fields = _required_create_fields(stored_parameters)
+                followup = _normalize_create_followup(text, missing_fields)
+                if followup:
+                    analysis_text = _pending_create_prompt(stored_parameters, followup)
+                elif re.fullmatch(r"\d+(?:\s*개)?", text) and len(missing_fields) > 1:
+                    ambiguity = {
+                        "ko": "이 숫자가 vCPU인지 RAM인지 함께 알려 주세요.",
+                        "vi": "Hãy cho biết con số này là vCPU hay RAM.",
+                        "en": "Please specify whether this number is vCPU or RAM.",
+                    }
+                    return LLMDecision(
+                        decision_type="clarification",
+                        pending_action="plan_create_instance",
+                        parameters=ActionParameters.model_validate(stored_parameters),
+                        message=ambiguity[language],
+                    )
+            else:
+                pending_create = _pending_create_context(conversation_context)
+            if analysis_text == text and not stored_pending and pending_create:
                 prior_create, missing_fields = pending_create
                 followup = _normalize_create_followup(text, missing_fields)
                 if followup:
@@ -260,11 +320,37 @@ class MockLLMClient(LLMClient):
                 }
                 return LLMDecision(
                     decision_type="clarification",
+                    pending_action="plan_create_instance",
                     message=clarification[language],
                 )
             vcpus = _extract_vcpus(analysis_text)
             ram_gb = _extract_ram_gb(analysis_text)
             operating_system = "ubuntu" if "ubuntu" in analysis_text else None
+            name_match = re.search(
+                r"(?:이름(?:은|을)?|name|tên(?:\s+là)?)\s*[:=：]?\s*([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})",
+                analysis_text,
+            )
+            version_match = re.search(r"\b(22\.04|24\.04)\b", analysis_text)
+            version = version_match.group(1) if version_match else None
+            if _has_any(analysis_text, ("gpu 필요 없", "gpu는 필요 없", "gpu 없이", "gpu 불필요", "no gpu", "không cần gpu", "không gpu")):
+                requires_gpu = False
+            elif "gpu" in analysis_text:
+                requires_gpu = True
+            else:
+                requires_gpu = False
+            parameters = ActionParameters(
+                operating_system=operating_system,
+                operating_system_version=version,
+                vcpus=vcpus,
+                ram_gb=ram_gb,
+                requires_gpu=requires_gpu,
+                name=name_match.group(1) if name_match else None,
+            )
+            if requires_gpu:
+                return LLMDecision(
+                    decision_type="answer",
+                    message=_message("gpu_unsupported", language),
+                )
             missing = []
             if not operating_system:
                 missing.append({"ko": "운영체제", "vi": "hệ điều hành", "en": "operating system"}[language])
@@ -281,25 +367,10 @@ class MockLLMClient(LLMClient):
                 }
                 return LLMDecision(
                     decision_type="clarification",
+                    pending_action="plan_create_instance",
+                    parameters=parameters,
                     message=clarification[language],
                 )
-            if _has_any(analysis_text, ("gpu 필요 없", "gpu는 필요 없", "gpu 없이", "gpu 불필요", "no gpu", "không cần gpu", "không gpu")):
-                requires_gpu = False
-            elif "gpu" in analysis_text:
-                requires_gpu = True
-            else:
-                requires_gpu = False
-            if requires_gpu:
-                return LLMDecision(
-                    decision_type="answer",
-                    message=_message("gpu_unsupported", language),
-                )
-            name_match = re.search(
-                r"(?:이름(?:은|을)?|name|tên)\s*[:=：]?\s*([a-zA-Z0-9][a-zA-Z0-9_-]{0,62})",
-                analysis_text,
-            )
-            version_match = re.search(r"\b(22\.04|24\.04)\b", analysis_text)
-            version = version_match.group(1) if version_match else None
             plan_messages = {
                 "ko": "적합한 구성을 확인하겠습니다.",
                 "vi": "Tôi sẽ kiểm tra cấu hình phù hợp.",
@@ -314,14 +385,7 @@ class MockLLMClient(LLMClient):
             return self._action(
                 "plan_create_instance",
                 f"{plan_messages[language]}{default_message}",
-                ActionParameters(
-                    operating_system=operating_system,
-                    operating_system_version=version,
-                    vcpus=vcpus,
-                    ram_gb=ram_gb,
-                    requires_gpu=requires_gpu,
-                    name=name_match.group(1) if name_match else None,
-                ),
+                parameters,
             )
         for action, phrases, reply in (
             ("reboot_instance", ("재부팅", "다시 시작", "reboot", "restart instance", "khởi động lại"), {
@@ -428,8 +492,10 @@ that are actually missing. Understand equivalent parameter orders such as "4 CPU
 leave operating_system_version null and explicitly say Ubuntu 24.04 will be selected by default.
 
 Use conversation_context only when the immediately preceding assistant message asked for missing
-details. Do not revive an older request after the user has changed topics. Reply in the language of the
-current user message, including Vietnamese, Korean, or English. Refuse deletion, shell commands,
+details. If cloud_context.pending_request exists, treat its parameters as collected state, merge new
+details into it, and set pending_action=plan_create_instance on clarifications. Do not revive an older
+request after the user has changed topics. Reply in the language of the current user message, including
+Vietnamese, Korean, or English. Refuse deletion, shell commands,
 controller or compute changes, shared-network changes, and opening all firewall access. Never output
 credentials, tokens, passwords, or private keys. Set requires_confirmation=false; only the backend
 decides confirmation policy, validates metadata, and performs verified work."""

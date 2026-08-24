@@ -64,6 +64,29 @@ class Repository:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_requests (
+                    session_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT 'ko',
+                    parameters TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (session_id, user_id, project_id)
+                )
+                """
+            )
+            pending_request_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(pending_requests)").fetchall()
+            }
+            if "language" not in pending_request_columns:
+                connection.execute(
+                    "ALTER TABLE pending_requests ADD COLUMN language TEXT NOT NULL DEFAULT 'ko'"
+                )
             operation_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(operations)").fetchall()
             }
@@ -205,9 +228,83 @@ class Repository:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM operations WHERE session_id = ?", (session_id,))
+            connection.execute("DELETE FROM pending_requests WHERE session_id = ?", (session_id,))
             connection.execute("DELETE FROM instances WHERE session_id = ?", (session_id,))
             self._seed_session(connection, session_id)
         return self.list_instances(session_id)
+
+    def get_pending_request(
+        self, *, session_id: str, user_id: str, project_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT action, language, parameters, created_at, updated_at
+                FROM pending_requests
+                WHERE session_id = ? AND user_id = ? AND project_id = ?
+                """,
+                (session_id, user_id, project_id),
+            ).fetchone()
+        if not row:
+            return None
+        pending = dict(row)
+        pending["parameters"] = json.loads(pending["parameters"])
+        return pending
+
+    def upsert_pending_request(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        project_id: str,
+        action: str,
+        language: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pending_requests
+                    (session_id, user_id, project_id, action, language, parameters,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, user_id, project_id) DO UPDATE SET
+                    action = excluded.action,
+                    language = excluded.language,
+                    parameters = excluded.parameters,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    user_id,
+                    project_id,
+                    action,
+                    language,
+                    json.dumps(parameters),
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "action": action,
+            "language": language,
+            "parameters": parameters,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def clear_pending_request(
+        self, *, session_id: str, user_id: str, project_id: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM pending_requests
+                WHERE session_id = ? AND user_id = ? AND project_id = ?
+                """,
+                (session_id, user_id, project_id),
+            )
 
     def create_operation(self, operation: dict[str, Any]) -> dict[str, Any]:
         record = {**operation, "payload": json.dumps(operation["payload"])}

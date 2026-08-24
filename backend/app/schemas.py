@@ -47,6 +47,7 @@ class LLMDecision(BaseModel):
 
     decision_type: Literal["action", "clarification", "answer"]
     action: AllowedAction | None = None
+    pending_action: Literal["plan_create_instance"] | None = None
     parameters: ActionParameters = Field(default_factory=ActionParameters)
     message: str = Field(min_length=1, max_length=500)
     requires_confirmation: bool = False
@@ -57,6 +58,8 @@ class LLMDecision(BaseModel):
             raise ValueError("An action decision must include an allowed action")
         if self.decision_type != "action" and self.action is not None:
             raise ValueError("Only an action decision may include an action")
+        if self.decision_type != "clarification" and self.pending_action is not None:
+            raise ValueError("Only a clarification decision may include a pending action")
         if self.decision_type != "action" and self.requires_confirmation:
             raise ValueError("Only an action decision may request confirmation")
         return self
