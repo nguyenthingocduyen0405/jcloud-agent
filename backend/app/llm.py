@@ -138,21 +138,55 @@ def _extract_ram_gb(text: str) -> int | None:
     return None
 
 
-def _pending_create_context(conversation_context: list[dict[str, str]]) -> str | None:
+def _missing_create_fields(assistant_text: str) -> frozenset[str]:
+    fields = set()
+    if "vcpu" in assistant_text:
+        fields.add("vcpus")
+    if "ram" in assistant_text:
+        fields.add("ram_gb")
+    if _has_any(assistant_text, ("운영체제", "hệ điều hành", "operating system")):
+        fields.add("operating_system")
+    return frozenset(fields)
+
+
+def _pending_create_context(
+    conversation_context: list[dict[str, str]],
+) -> tuple[str, frozenset[str]] | None:
     context = conversation_context[-10:]
     if len(context) < 2:
         return None
     prior_user, prior_assistant = context[-2], context[-1]
     assistant_text = _plain(prior_assistant.get("content", ""))
     user_text = _plain(prior_user.get("content", ""))
+    missing_fields = _missing_create_fields(assistant_text)
     if (
         prior_user.get("role") == "user"
         and prior_assistant.get("role") == "assistant"
-        and "vcpu" in assistant_text
-        and "ram" in assistant_text
+        and missing_fields
         and _has_any(user_text, CREATE_PHRASES)
     ):
-        return user_text
+        return user_text, missing_fields
+    return None
+
+
+def _normalize_create_followup(text: str, missing_fields: frozenset[str]) -> str | None:
+    if (
+        _extract_vcpus(text) is not None
+        or _extract_ram_gb(text) is not None
+        or ("operating_system" in missing_fields and "ubuntu" in text)
+    ):
+        return text
+
+    number_match = re.fullmatch(r"(\d+)(?:\s*개)?", text)
+    if not number_match or len(missing_fields) != 1:
+        return None
+
+    value = number_match.group(1)
+    missing_field = next(iter(missing_fields))
+    if missing_field == "vcpus":
+        return f"{value} vcpu"
+    if missing_field == "ram_gb":
+        return f"ram {value} gb"
     return None
 
 
@@ -183,12 +217,13 @@ class MockLLMClient(LLMClient):
         text = _plain(message.strip())
         language = _language(message, conversation_context)
         analysis_text = text
-        if not _has_any(text, CREATE_PHRASES) and (
-            _extract_vcpus(text) is not None or _extract_ram_gb(text) is not None
-        ):
-            prior_create = _pending_create_context(conversation_context)
-            if prior_create:
-                analysis_text = f"{prior_create} {text}"
+        if not _has_any(text, CREATE_PHRASES):
+            pending_create = _pending_create_context(conversation_context)
+            if pending_create:
+                prior_create, missing_fields = pending_create
+                followup = _normalize_create_followup(text, missing_fields)
+                if followup:
+                    analysis_text = f"{prior_create} {followup}"
 
         if any(term in analysis_text for term in ("삭제", "delete", "shell", "powershell", "cmd.exe", "firewall", "방화벽", "controller", "compute node")):
             return LLMDecision(

@@ -137,6 +137,40 @@ def test_multi_turn_create_uses_conversation_context(tmp_path):
         assert operation["payload"]["requires_gpu"] is False
 
 
+def test_multi_turn_create_accepts_a_short_vcpu_answer(tmp_path):
+    with client(tmp_path) as api:
+        for index, followup in enumerate(("4", "4 vCPU")):
+            headers = {**MOCK_HEADERS, "X-Session-ID": f"short-vcpu-{index}"}
+            first_user_message = "Tạo máy Ubuntu 24.04 RAM 16 GB"
+            first = api.post(
+                "/api/chat",
+                headers=headers,
+                json={"message": first_user_message},
+            ).json()
+
+            assert first["operation"] is None
+            assert first["message"] == "Vui lòng cho biết thêm: vCPU."
+
+            second = api.post(
+                "/api/chat",
+                headers=headers,
+                json={
+                    "message": followup,
+                    "conversation_context": [
+                        {"role": "user", "content": first_user_message},
+                        {"role": "assistant", "content": first["message"]},
+                    ],
+                },
+            ).json()
+
+            operation = second["operation"]
+            assert operation["status"] == "waiting_for_confirmation"
+            assert operation["payload"]["image"] == "Ubuntu 24.04"
+            assert operation["payload"]["vcpus"] == 4
+            assert operation["payload"]["ram_gb"] == 16
+            assert operation["payload"]["flavor"] == "large"
+
+
 def test_mock_llm_only_continues_an_immediately_pending_create():
     llm = MockLLMClient()
     stale_context = [

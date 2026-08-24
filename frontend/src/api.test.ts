@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { checkBackend, getOrCreateSessionId, resetSandbox, SESSION_STORAGE_KEY } from "./api";
+import { checkBackend, getOrCreateSessionId, resetSandbox, sendMessage, SESSION_STORAGE_KEY } from "./api";
 
 describe("browser session", () => {
   beforeEach(() => {
@@ -37,6 +37,30 @@ describe("browser session", () => {
     const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>;
     expect(headers["X-Session-ID"]).toBe("persisted-browser-uuid");
     expect(headers["X-Session-ID"]).not.toBe("mock-session");
+  });
+
+  it("sends conversation context and reuses the same session for follow-up answers", async () => {
+    localStorage.setItem(SESSION_STORAGE_KEY, "conversation-session-uuid");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ message: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const context = [
+      { role: "user" as const, content: "Tạo máy Ubuntu 24.04 RAM 16 GB" },
+      { role: "assistant" as const, content: "Vui lòng cho biết thêm: vCPU." },
+    ];
+
+    await sendMessage("4", context);
+
+    const init = fetchMock.mock.calls[0][1];
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["X-Session-ID"]).toBe("conversation-session-uuid");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      message: "4",
+      conversation_context: context,
+    });
   });
 
   it("calls the session-scoped sandbox reset endpoint", async () => {
